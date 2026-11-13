@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhantomMirror</title>
+<style>
+:root{
+  color-scheme:light;
+  --bg:#f4f3f0; --surface:#fcfcfb; --line:#e3e1db; --text:#0b0b0b; --text2:#52514e; --muted:#8a8882;
+  --series-1:#2a78d6; --series-2:#eb6834; --up:#0a7a3d; --down:#c0322f;
+}
+@media (prefers-color-scheme:dark){:root{
+  color-scheme:dark;
+  --bg:#111110; --surface:#1a1a19; --line:#2e2d2a; --text:#f0efec; --text2:#c3c2b7; --muted:#8a8882;
+  --series-1:#3987e5; --series-2:#d95926; --up:#4cc38a; --down:#e66767;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+header{display:flex;align-items:baseline;gap:16px;padding:18px 24px 6px;flex-wrap:wrap}
+h1{font-size:18px;margin:0;letter-spacing:-.01em}
+h2{font-size:13px;margin:0 0 10px;color:var(--text2);font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+#status{color:var(--muted);font-size:12px}
+main{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;padding:12px 24px 40px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px;min-width:0}
+.c6{grid-column:span 6}.c12{grid-column:span 12}.c4{grid-column:span 4}.c8{grid-column:span 8}
+@media(max-width:900px){.c6,.c4,.c8{grid-column:span 12}main{padding:12px}}
+.num{font-variant-numeric:tabular-nums}
+.big{font-size:28px;font-weight:650;letter-spacing:-.02em}
+.kv{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px}
+.kv div{font-size:12px;color:var(--muted)}.kv b{display:block;color:var(--text);font-size:14px;font-weight:600}
+.sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:7px;vertical-align:baseline}
+.up{color:var(--up)}.down{color:var(--down)}
+.scroll{overflow:auto;max-height:340px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{position:sticky;top:0;background:var(--surface);text-align:left;color:var(--muted);font-weight:500;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+td.r,th.r{text-align:right}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.tag{font-size:11px;padding:1px 6px;border-radius:9px;border:1px solid var(--line);color:var(--text2)}
+form{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+input,button{font:inherit;padding:7px 10px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
+input{flex:1;min-width:120px}button{cursor:pointer}button:hover{border-color:var(--muted)}
+button.link{border:0;background:none;color:var(--muted);padding:0}
+.legend{display:flex;gap:18px;font-size:12px;color:var(--text2);margin-bottom:6px}
+#chart{width:100%;height:240px;display:block}
+#tip{position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;display:none;box-shadow:0 4px 14px rgba(0,0,0,.12)}
+.empty{color:var(--muted);padding:14px 4px}
+.note{color:var(--muted);font-size:12px;margin:8px 0 0}
+#msg{font-size:12px;color:var(--down);min-height:16px}
+</style>
+</head>
+<body>
+<header>
+  <h1>PhantomMirror</h1>
+  <span id="status">loading…</span>
+</header>
+<main>
+  <section class="card c6" id="s-copy"></section>
+  <section class="card c6" id="s-consensus"></section>
+
+  <section class="card c12">
+    <h2>Paper equity</h2>
+    <div class="legend"><span><i class="sw" style="background:var(--series-1)"></i>1:1 copy</span><span><i class="sw" style="background:var(--series-2)"></i>Consensus</span></div>
+    <svg id="chart" role="img" aria-label="Paper equity over time for both strategies"></svg>
+  </section>
+
+  <section class="card c8">
+    <h2>Tracked traders</h2>
+    <form id="add">
+      <input id="addr" placeholder="0x… address from Phantom › Perps › Top Traders" required>
+      <input id="label" placeholder="label (optional)" style="max-width:170px">
+      <button>Add trader</button>
+      <button type="button" id="seed" title="Hyperliquid-wide weekly leaderboard, not Phantom's own list">Seed HL top 10</button>
+    </form>
+    <div id="msg"></div>
+    <div class="scroll"><table id="traders"></table></div>
+  </section>
+
+  <section class="card c4">
+    <h2>Consensus board</h2>
+    <div class="scroll"><table id="board"></table></div>
+    <p class="note" id="rule"></p>
+  </section>
+
+  <section class="card c12">
+    <h2>Open paper positions</h2>
+    <div class="scroll"><table id="positions"></table></div>
+  </section>
+
+  <section class="card c6">
+    <h2>Trader activity</h2>
+    <div class="scroll"><table id="events"></table></div>
+  </section>
+  <section class="card c6">
+    <h2>Paper fills</h2>
+    <div class="scroll"><table id="fills"></table></div>
+  </section>
+</main>
+<div id="tip"></div>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const usd = (v, d=0) => v == null ? '–' : (v < 0 ? '−' : '') + '$' + Math.abs(v).toLocaleString('en-US', {minimumFractionDigits:d, maximumFractionDigits:d});
+const signed = (v, d=2) => v == null ? '–' : `<span class="${v >= 0 ? 'up' : 'down'}">${v >= 0 ? '+' : '−'}$${Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d})}</span>`;
+const px = v => v == null ? '–' : Number(v).toLocaleString('en-US', {maximumSignificantDigits: 6});
+const qty = v => Number(v).toLocaleString('en-US', {maximumSignificantDigits: 5});
+const short = a => a.startsWith('0x') ? a.slice(0, 6) + '…' + a.slice(-4) : a;
+const ago = ts => { if (!ts) return 'never'; const s = Date.now()/1000 - ts; return s < 90 ? Math.round(s)+'s ago' : s < 5400 ? Math.round(s/60)+'m ago' : s < 129600 ? Math.round(s/3600)+'h ago' : Math.round(s/86400)+'d ago'; };
+const side = v => v > 0 ? '<span class="up">Long</span>' : '<span class="down">Short</span>';
+let token = '', names = {}, adminRequired = false;
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {...opts, headers: {'Content-Type':'application/json', 'x-admin-token': token, ...(opts.headers||{})}});
+  if (r.status === 401) { token = prompt('Admin token') || ''; if (token) return api(path, opts); }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+const table = (el, head, rows, empty) => {
+  el.innerHTML = rows.length ? `<thead><tr>${head.map(h => `<th class="${h.startsWith('>') ? 'r' : ''}">${h.replace('>','')}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody>`
+    : `<tbody><tr><td class="empty">${empty}</td></tr></tbody>`;
+};
+
+function strategyCard(el, s, title, color, blurb) {
+  el.innerHTML = `<h2><i class="sw" style="background:var(${color})"></i>${title}</h2>
+    <div class="big num">${usd(s.equity, 2)} <span style="font-size:15px;font-weight:500">${signed(s.pnl)}</span></div>
+    <div class="kv num">
+      <div>Realized<b>${signed(s.realized)}</b></div><div>Unrealized<b>${signed(s.unrealized)}</b></div>
+      <div>Fees paid<b>${usd(s.fees, 2)}</b></div><div>Exposure<b>${usd(s.exposure)}</b></div>
+      <div>Open positions<b>${s.open_positions}</b></div><div>Fills<b>${s.fills}</b></div>
+      <div>Closing fills<b>${s.closed}</b></div><div>Win rate<b>${s.win_rate == null ? '–' : Math.round(s.win_rate*100)+'%'}</b></div>
+    </div><p class="note">${blurb}</p>`;
+}
+
+let series = {copy: [], consensus: []};
+function drawChart() {
+  const svg = $('#chart'), W = svg.clientWidth || 800, H = 240, m = {l: 58, r: 74, t: 10, b: 24};
+  const all = [...series.copy, ...series.consensus];
+  if (all.length < 2) { svg.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle" fill="var(--muted)" font-size="13">Equity history appears after a few polls</text>`; return; }
+  let x0 = Math.min(...all.map(p => p.ts)), x1 = Math.max(...all.map(p => p.ts));
+  let y0 = Math.min(...all.map(p => p.equity)), y1 = Math.max(...all.map(p => p.equity));
+  const pad = Math.max((y1 - y0) * .12, 1); y0 -= pad; y1 += pad; if (x1 === x0) x1 = x0 + 1;
+  const X = t => m.l + (t - x0) / (x1 - x0) * (W - m.l - m.r), Y = v => m.t + (y1 - v) / (y1 - y0) * (H - m.t - m.b);
+  let g = '';
+  for (let i = 0; i <= 4; i++) { const v = y0 + (y1 - y0) * i / 4, y = Y(v);
+    g += `<line x1="${m.l}" x2="${W-m.r}" y1="${y}" y2="${y}" stroke="var(--line)"/><text x="${m.l-8}" y="${y+4}" text-anchor="end" font-size="11" fill="var(--muted)">${usd(v)}</text>`; }
+  const fmtT = t => new Date(t*1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+  g += `<text x="${m.l}" y="${H-6}" font-size="11" fill="var(--muted)">${fmtT(x0)}</text><text x="${W-m.r}" y="${H-6}" text-anchor="end" font-size="11" fill="var(--muted)">${fmtT(x1)}</text>`;
+  const defs = [['copy','--series-1','Copy'],['consensus','--series-2','Consensus']];
+  const ends = [];
+  for (const [k, c, name] of defs) { const pts = series[k]; if (!pts.length) continue;
+    g += `<path d="${pts.map((p,i) => (i?'L':'M') + X(p.ts).toFixed(1) + ' ' + Y(p.equity).toFixed(1)).join('')}" fill="none" stroke="var(${c})" stroke-width="2" stroke-linejoin="round"/>`;
+    const last = pts[pts.length-1]; ends.push({y: Y(last.equity), c, name}); }
+  ends.sort((a,b) => a.y - b.y); if (ends.length === 2 && ends[1].y - ends[0].y < 14) { const mid = (ends[0].y + ends[1].y)/2; ends[0].y = mid - 7; ends[1].y = mid + 7; }
+  for (const e of ends) g += `<circle cx="${W-m.r}" cy="${e.y}" r="0"/><text x="${W-m.r+8}" y="${e.y+4}" font-size="12" fill="var(--text2)">${e.name}</text>`;
+  g += `<line id="cross" y1="${m.t}" y2="${H-m.b}" stroke="var(--muted)" stroke-dasharray="3 3" visibility="hidden"/>` + defs.map(([k,c]) => `<circle id="dot-${k}" r="4" fill="var(${c})" stroke="var(--surface)" stroke-width="2" visibility="hidden"/>`).join('');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.innerHTML = g;
+  const near = (pts, t) => pts.reduce((a, p) => Math.abs(p.ts - t) < Math.abs(a.ts - t) ? p : a, pts[0]);
+  svg.onmousemove = ev => { const r = svg.getBoundingClientRect(), t = x0 + ((ev.clientX - r.left) - m.l) / (W - m.l - m.r) * (x1 - x0);
+    if (t < x0 || t > x1) return svg.onmouseleave();
+    let html = '', tt = null;
+    for (const [k, c, name] of defs) { if (!series[k].length) continue; const p = near(series[k], t); tt = p.ts;
+      const d = $('#dot-'+k); d.setAttribute('cx', X(p.ts)); d.setAttribute('cy', Y(p.equity)); d.setAttribute('visibility','visible');
+      html += `<div><i class="sw" style="background:var(${c})"></i>${name} <b class="num">${usd(p.equity, 2)}</b></div>`; }
+    const cr = $('#cross'); cr.setAttribute('x1', X(tt)); cr.setAttribute('x2', X(tt)); cr.setAttribute('visibility','visible');
+    const tip = $('#tip'); tip.innerHTML = `<div style="color:var(--muted);margin-bottom:4px">${fmtT(tt)}</div>` + html; tip.style.display = 'block';
+    tip.style.left = Math.min(ev.clientX + 14, innerWidth - 190) + 'px'; tip.style.top = (ev.clientY + 14) + 'px'; };
+  svg.onmouseleave = () => { $('#tip').style.display = 'none'; svg.querySelectorAll('#cross,[id^=dot-]').forEach(e => e.setAttribute('visibility','hidden')); };
+}
+
+async function refresh() {
+  try {
+    const [sum, traders, pos, board, events, fills, eq] = await Promise.all(
+      ['summary','traders','positions','consensus','events?limit=60','fills?limit=60','equity'].map(p => api('/api/' + p)));
+    const cfg = sum.config; adminRequired = cfg.admin_required;
+    $('#status').textContent = `${cfg.demo_mode ? 'DEMO DATA · ' : ''}paper trading · last poll ${ago(sum.last_poll)}` + (sum.last_poll_error ? ` · error: ${sum.last_poll_error}` : '');
+    const by = Object.fromEntries(sum.strategies.map(s => [s.strategy, s]));
+    strategyCard($('#s-copy'), by.copy, '1:1 copy', '--series-1', `Mirrors each trader at their own leverage on ${usd(cfg.copy_alloc_usd)} of paper equity per trader, capped at ${cfg.copy_max_leverage}×.`);
+    strategyCard($('#s-consensus'), by.consensus, 'Consensus', '--series-2', `${usd(cfg.consensus_notional_usd)} per signal when ≥${cfg.consensus_min_traders} traders and ≥${Math.round(cfg.consensus_agreement*100)}% of holders agree.`);
+    $('#rule').textContent = `Signal needs ≥${cfg.consensus_min_traders} traders and ≥${Math.round(cfg.consensus_agreement*100)}% agreement.`;
+    names = Object.fromEntries(traders.map(t => [t.address, t.label || short(t.address)]));
+    series = eq; drawChart();
+
+    table($('#traders'), ['Trader','Address','>Account','Open positions','>Copy P&L','Seen',''], traders.map(t => `<tr style="${t.active ? '' : 'opacity:.45'}">
+      <td>${esc(t.label) || '–'} <span class="tag">${esc(t.source)}</span></td><td class="mono" title="${esc(t.address)}">${short(t.address)}</td>
+      <td class="r num">${usd(t.account_value)}</td>
+      <td>${t.positions.map(p => `${esc(p.coin)} ${side(p.szi)}${p.baseline ? ' <span class="tag" title="Open before tracking began; not copied">pre</span>' : ''}`).join(', ') || (t.active ? 'flat' : 'removed')}</td>
+      <td class="r num">${signed(t.copy_pnl)}</td><td>${t.last_error ? `<span class="down" title="${esc(t.last_error)}">error</span>` : ago(t.last_seen)}</td>
+      <td>${t.active ? `<button class="link" data-rm="${esc(t.address)}">remove</button>` : ''}</td></tr>`), 'No traders yet. Paste 0x addresses from Phantom’s Top Traders list above.');
+    table($('#board'), ['Coin','>Long','>Short','Signal'], board.map(b => `<tr><td>${esc(b.coin)}</td><td class="r num">${b.long}</td><td class="r num">${b.short}</td><td>${b.signal ? side(b.signal) : '<span style="color:var(--muted)">–</span>'}</td></tr>`), 'No open positions among tracked traders.');
+    table($('#positions'), ['Strategy','Source','Coin','Side','>Size','>Entry','>Mark','>Notional','>Unrealized','Opened'], pos.map(p => `<tr>
+      <td><i class="sw" style="background:var(${p.strategy === 'copy' ? '--series-1' : '--series-2'})"></i>${p.strategy}</td><td>${esc(names[p.source] || p.source)}</td><td>${esc(p.coin)}</td><td>${side(p.size)}</td>
+      <td class="r num">${qty(Math.abs(p.size))}</td><td class="r num">${px(p.entry_px)}</td><td class="r num">${px(p.mid)}</td><td class="r num">${usd(p.notional)}</td><td class="r num">${signed(p.unrealized)}</td><td>${ago(p.opened_at)}</td></tr>`), 'No open paper positions.');
+    table($('#events'), ['When','Trader','Action','Coin','>Size','>Price'], events.map(e => `<tr><td>${ago(e.ts)}</td><td>${esc(e.label || short(e.address))}</td><td>${e.kind}</td><td>${esc(e.coin)}</td><td class="r num">${qty(e.prev_szi)} → ${qty(e.new_szi)}</td><td class="r num">${px(e.px)}</td></tr>`), 'Nothing yet. Events appear when a tracked trader changes a position.');
+    table($('#fills'), ['When','Strategy','Coin','>Qty','>Price','>Realized','Reason'], fills.map(f => `<tr><td>${ago(f.ts)}</td><td>${f.strategy}</td><td>${esc(f.coin)}</td><td class="r num">${f.delta > 0 ? '+' : '−'}${qty(Math.abs(f.delta))}</td><td class="r num">${px(f.px)}</td><td class="r num">${f.closing ? signed(f.realized_pnl) : '–'}</td><td>${esc(f.reason)}</td></tr>`), 'No paper fills yet.');
+  } catch (e) { $('#status').textContent = 'error: ' + e.message; }
+}
+
+$('#add').onsubmit = async ev => { ev.preventDefault(); $('#msg').textContent = '';
+  try { await api('/api/traders', {method:'POST', body: JSON.stringify({address: $('#addr').value, label: $('#label').value})}); $('#addr').value = $('#label').value = ''; refresh(); }
+  catch (e) { $('#msg').textContent = e.message; } };
+$('#seed').onclick = async () => { $('#msg').textContent = 'Fetching Hyperliquid leaderboard…';
+  try { const r = await api('/api/traders/seed', {method:'POST', body: JSON.stringify({window:'week', top:10})}); $('#msg').textContent = `Added ${r.added.length} of ${r.found}.`; refresh(); }
+  catch (e) { $('#msg').textContent = e.message; } };
+$('#traders').onclick = async ev => { const a = ev.target.dataset.rm; if (!a) return;
+  try { await api('/api/traders/' + a, {method:'DELETE'}); refresh(); } catch (e) { $('#msg').textContent = e.message; } };
+addEventListener('resize', drawChart);
+refresh(); setInterval(refresh, 10000);
+</script>
+</body>
+</html>
