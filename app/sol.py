@@ -56,6 +56,9 @@ class SolClient:
         sol += tokens.pop(SOL_MINT, 0.0)
         return {"sol": sol, "tokens": tokens}
 
+    async def sol_balance(self, owner: str) -> float:
+        return (await self._rpc("getBalance", [owner, {"commitment": "confirmed"}]))["value"] / 1e9
+
     async def prices(self, mints: list[str]) -> dict[str, dict]:
         """mint -> {'price', 'liquidity'}; tokens Jupiter can't price reliably are omitted."""
         out: dict[str, dict] = {}
@@ -65,7 +68,8 @@ class SolClient:
             r.raise_for_status()
             for mint, d in (r.json() or {}).items():
                 if d and d.get("usdPrice") is not None:
-                    out[mint] = {"price": float(d["usdPrice"]), "liquidity": float(d.get("liquidity") or 0)}
+                    out[mint] = {"price": float(d["usdPrice"]), "liquidity": float(d.get("liquidity") or 0),
+                                 "decimals": d.get("decimals")}
         return out
 
     async def token_info(self, mints: list[str]) -> dict[str, dict]:
@@ -125,8 +129,12 @@ class DemoSolClient:
         w = self.w.get(owner, {"sol": 0.0, "tokens": {}})
         return {"sol": w["sol"], "tokens": dict(w["tokens"])}
 
+    async def sol_balance(self, owner):
+        return 1.5
+
     async def prices(self, mints):
-        return {m: {"price": self.px[m], "liquidity": self.TOKENS.get(m, ("", 0, 1e9))[2]} for m in mints if m in self.px}
+        return {m: {"price": self.px[m], "liquidity": self.TOKENS.get(m, ("", 0, 1e9))[2], "decimals": 9 if m == SOL_MINT else 6}
+                for m in mints if m in self.px}
 
     async def token_info(self, mints):
         return {m: {"symbol": self.TOKENS[m][0], "name": ""} for m in mints if m in self.TOKENS}

@@ -17,6 +17,8 @@ from pydantic import BaseModel
 
 from .config import Config
 from .db import DB
+from .discover import PERP_WINDOWS, SPOT_WINDOWS, DemoDiscovery, Discovery
+from .dryrun import DemoDryRun, DryRun
 from .engine import STRATEGIES, Engine
 from .hl import DemoClient, HLClient
 from .sol import CASH_MINTS, SOL_ADDR_RE, SOL_MINT, DemoSolClient, SolClient
@@ -34,6 +36,8 @@ class State:
     engine: Engine
     hl: object
     sol: object
+    discovery: object
+    dryrun: object
     mids: dict = {}                    # perp coin -> mid
     spot_px: dict = {}                 # mint -> {price, liquidity, ts}
     symbols: dict = {}                 # mint -> symbol
@@ -132,6 +136,16 @@ async def poll_spot(now: float) -> None:
 
     S.engine.run_spot_copy(S.spot_px, now)
 
+    if S.cfg.dryrun_enabled:
+        bal = None
+        if S.cfg.dryrun_sol_wallet:
+            try:
+                bal = await S.sol.sol_balance(S.cfg.dryrun_sol_wallet)
+            except Exception as e:
+                log.warning("dry-run wallet balance failed: %s", e)
+        for d in await S.dryrun.run(S.spot_px, bal, now):
+            log.info("DRYRUN %s %s $%.0f %s %s", d["side"], sym(d["mint"]), d["usd"], d["status"], d["detail"])
+
 
 async def poll_once(now: float | None = None) -> None:
     now = now or time.time()
@@ -169,6 +183,7 @@ def init_state(cfg: Config | None = None, db_path: str | None = None) -> None:
     S.symbols = {r["mint"]: r["symbol"] for r in S.db.q("SELECT * FROM tokens")}
     if S.cfg.demo_mode:
         S.hl, S.sol = DemoClient(), DemoSolClient()
+        S.discovery, S.dryrun = DemoDiscovery(S.cfg), DemoDryRun(S.db, S.cfg, S.spot_px)
         for addr, name in DemoClient.TRADERS.items():
             S.db.x("INSERT OR IGNORE INTO traders(address,label,source,chain,added_at) VALUES(?,?,?,?,?)",
                    (addr, name, "demo", "hl", time.time()))
@@ -178,6 +193,7 @@ def init_state(cfg: Config | None = None, db_path: str | None = None) -> None:
     else:
         S.hl = HLClient(S.cfg.hl_info_url, S.cfg.hl_leaderboard_url, S.cfg.hl_dexs)
         S.sol = SolClient(S.cfg.solana_rpc_url, S.cfg.jup_api_base, S.cfg.jup_api_key)
+        S.discovery, S.dryrun = Discovery(S.cfg), DryRun(S.db, S.cfg)
 
 
 @asynccontextmanager
@@ -189,6 +205,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
     await S.hl.close()
     await S.sol.close()
+    await S.dryrun.close()
 
 
 app = FastAPI(title="PhantomMirror", lifespan=lifespan)
@@ -289,6 +306,35 @@ def equity(max_points: int = 600):
         step = max(1, len(rows) // max_points)
         out[s] = rows[::step] + (rows[-1:] if rows and (len(rows) - 1) % step else [])
     return out
+
+
+@app.get("/api/discover")
+async def discover(category: str = "perps", window: str = "week"):
+    windows = PERP_WINDOWS if category == "perps" else SPOT_WINDOWS if category == "spot" else None
+    if windows is None or window not in windows:
+        raise HTTPException(400, "category must be perps or spot, with a window from " + ", ".join(windows or PERP_WINDOWS))
+    try:
+        rows = await S.discovery.get(category, window)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"leaderboard fetch failed: {type(e).__name__}: {e}")
+    tracked = {r["address"] for r in S.db.q("SELECT address FROM traders WHERE active=1")}
+    return [dict(r, tracked=r["address"] in tracked) for r in rows]
+
+
+@app.get("/api/dryrun")
+def dryrun(limit: int = 60):
+    rows = S.db.q("SELECT d.*, t.label FROM dryrun d LEFT JOIN traders t ON t.address=d.source "
+                  "ORDER BY d.id DESC LIMIT ?", (min(limit, 500),))
+    for r in rows:
+        r["symbol"] = sym(r["mint"])
+    agg = S.db.one("SELECT COUNT(*) n, SUM(status='ok') ok, SUM(status='blocked') blocked, SUM(status='error') errors, "
+                   "AVG(CASE WHEN status='ok' THEN impact_bps END) avg_impact FROM dryrun")
+    c = S.cfg
+    return {"summary": agg, "rows": rows, "enabled": c.dryrun_enabled, "wallet_set": bool(c.dryrun_sol_wallet),
+            "limits": {"max_trade_usd": c.live_max_trade_usd, "max_slippage_bps": c.live_max_slippage_bps,
+                       "daily_loss_usd": c.live_daily_loss_usd}}
 
 
 # ---------------------------------------------------------------------- admin API

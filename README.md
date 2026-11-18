@@ -42,6 +42,21 @@ Limits: a buy and sell inside one poll interval is invisible; prices are Jupiter
 flat slippage assumption, which flatters thin memecoins; the public Solana RPC rate-limits hard, so
 set `SOLANA_RPC_URL` to a provider endpoint for more than a couple of wallets.
 
+## Suggested traders
+
+The dashboard lists traders to follow with one click. Perps come from Hyperliquid's leaderboard
+(day / week / month / all time, accounts under `DISCOVER_MIN_ACCOUNT_USD` hidden). Spot comes from
+Solana Tracker's PnL leaderboard (needs `SOLANATRACKER_API_KEY`) with arbitrage bots excluded,
+at least 20 trades, and no single token over 80% of profit. Neither is Phantom's own Top Traders
+list, and neither knows Phantom usernames.
+
+## Dry run
+
+Every spot copy fill is re-priced with a real Jupiter quote at the size a live account would trade
+(`LIVE_MAX_TRADE_USD`), then checked against the live limits: maximum cost vs mid, a daily loss cap
+that stops new buys, and (if `DRYRUN_SOL_WALLET` is set to a public address) the wallet's SOL balance.
+The result shows what live execution would have done. Nothing is signed or sent and no key is used.
+
 ## Run locally
 
 ```bash

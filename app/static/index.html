@@ -46,6 +46,14 @@ button.link{border:0;background:none;color:var(--muted);padding:0}
 #chart{width:100%;height:240px;display:block}
 #tip{position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;display:none;box-shadow:0 4px 14px rgba(0,0,0,.12)}
 .empty{color:var(--muted);padding:14px 4px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.tabs button{padding:5px 11px;font-size:13px}
+.tabs button[aria-pressed="true"]{background:var(--text);color:var(--surface);border-color:var(--text)}
+.tabs .sep{width:1px;height:20px;background:var(--line);margin:0 6px}
+.tabs input{max-width:220px;padding:5px 10px;font-size:13px}
+button.follow{padding:3px 12px;font-size:12px}
+.stat-row{display:flex;gap:28px;flex-wrap:wrap;margin-bottom:12px}
+.stat-row div{font-size:12px;color:var(--muted)}.stat-row b{display:block;color:var(--text);font-size:18px;font-weight:600}
 .note{color:var(--muted);font-size:12px;margin:8px 0 0}
 #msg{font-size:12px;color:var(--down);min-height:16px}
 </style>
@@ -64,6 +72,19 @@ button.link{border:0;background:none;color:var(--muted);padding:0}
     <h2>Paper equity</h2>
     <div class="legend"><span><i class="sw" style="background:var(--series-1)"></i>1:1 copy</span><span><i class="sw" style="background:var(--series-2)"></i>Consensus</span><span><i class="sw" style="background:var(--series-3)"></i>Spot copy</span></div>
     <svg id="chart" role="img" aria-label="Paper equity over time for both strategies"></svg>
+  </section>
+
+  <section class="card c12">
+    <h2>Suggested traders</h2>
+    <div class="tabs" id="dtabs">
+      <button data-cat="perps" aria-pressed="true">Perps</button><button data-cat="spot" aria-pressed="false">Spot</button>
+      <span class="sep"></span>
+      <button data-win="day" aria-pressed="false">24h</button><button data-win="week" aria-pressed="true">7d</button><button data-win="month" aria-pressed="false">30d</button><button data-win="all" aria-pressed="false">All time</button>
+      <span class="sep"></span>
+      <input id="dfilter" placeholder="Filter by name or address">
+    </div>
+    <div class="scroll" style="max-height:300px"><table id="discover"></table></div>
+    <p class="note" id="dnote"></p>
   </section>
 
   <section class="card c8">
@@ -87,6 +108,13 @@ button.link{border:0;background:none;color:var(--muted);padding:0}
   <section class="card c12">
     <h2>Open paper positions</h2>
     <div class="scroll"><table id="positions"></table></div>
+  </section>
+
+  <section class="card c12">
+    <h2>Dry run · live spot execution check</h2>
+    <div class="stat-row num" id="drstats"></div>
+    <div class="scroll" style="max-height:300px"><table id="dryrun"></table></div>
+    <p class="note" id="drnote"></p>
   </section>
 
   <section class="card c6">
@@ -172,8 +200,9 @@ function drawChart() {
 
 async function refresh() {
   try {
-    const [sum, traders, pos, board, events, fills, eq] = await Promise.all(
-      ['summary','traders','positions','consensus','events?limit=60','fills?limit=60','equity'].map(p => api('/api/' + p)));
+    const [sum, traders, pos, board, events, fills, eq, dr] = await Promise.all(
+      ['summary','traders','positions','consensus','events?limit=60','fills?limit=60','equity','dryrun'].map(p => api('/api/' + p)));
+    renderDryrun(dr);
     const cfg = sum.config; adminRequired = cfg.admin_required;
     $('#status').textContent = `${cfg.demo_mode ? 'DEMO DATA · ' : ''}paper trading · last poll ${ago(sum.last_poll)}` + (sum.last_poll_error ? ` · error: ${sum.last_poll_error}` : '');
     const by = Object.fromEntries(sum.strategies.map(s => [s.strategy, s]));
@@ -199,6 +228,55 @@ async function refresh() {
   } catch (e) { $('#status').textContent = 'error: ' + e.message; }
 }
 
+let dcat = 'perps', dwin = 'week', drows = [], derr = '';
+async function loadDiscover() {
+  const t = $('#discover'); derr = ''; drows = [];
+  t.innerHTML = '<tbody><tr><td class="empty">Loading leaderboard…</td></tr></tbody>';
+  try { drows = await api(`/api/discover?category=${dcat}&window=${dwin}`); } catch (e) { derr = e.message; }
+  renderDiscover();
+}
+function renderDiscover() {
+  const f = $('#dfilter').value.trim().toLowerCase();
+  const rows = drows.filter(r => !f || r.address.toLowerCase().includes(f) || (r.name || '').toLowerCase().includes(f));
+  const wr = v => v == null ? '–' : Math.round(v > 1 ? v : v * 100) + '%';
+  const head = dcat === 'perps' ? ['Trader','Address','>Account','>P&L','>ROI','>Volume','']
+                                : ['Trader','Wallet','>Realized P&L','>ROI','>Win rate','>Trades',''];
+  const btn = r => r.tracked ? '<span class="tag">Following</span>'
+    : `<button class="follow" data-follow="${esc(r.address)}" data-name="${esc(r.name || '')}">Follow</button>`;
+  table($('#discover'), head, rows.map(r => dcat === 'perps'
+    ? `<tr><td>${esc(r.name) || '–'}</td><td class="mono" title="${esc(r.address)}">${short(r.address)}</td><td class="r num">${usd(r.account_value)}</td><td class="r num">${signed(r.pnl, 0)}</td><td class="r num">${Math.round(r.roi * 100)}%</td><td class="r num">${usd(r.volume)}</td><td class="r">${btn(r)}</td></tr>`
+    : `<tr><td>${esc(r.name) || '–'}${r.twitter ? ` <span class="tag">@${esc(r.twitter.replace(/^@/, ''))}</span>` : ''}</td><td class="mono" title="${esc(r.address)}">${short(r.address)}</td><td class="r num">${signed(r.pnl, 0)}</td><td class="r num">${Math.round(r.roi * 100)}%</td><td class="r num">${wr(r.win_rate)}</td><td class="r num">${r.trades ?? '–'}</td><td class="r">${btn(r)}</td></tr>`),
+    derr || (f ? 'No matches.' : 'No traders returned for this window.'));
+  $('#dnote').textContent = dcat === 'perps'
+    ? 'Hyperliquid-wide leaderboard (every Phantom perps trader is on it, but it isn’t Phantom’s own Top Traders list and has no Phantom usernames). Accounts under $25K hidden.'
+    : 'Solana Tracker PnL leaderboard: arbitrage bots excluded, at least 20 trades, no single token over 80% of profit. Names come from public labels, not Phantom usernames.';
+}
+$('#dtabs').onclick = ev => { const b = ev.target.closest('button'); if (!b) return;
+  if (b.dataset.cat) { dcat = b.dataset.cat; if (dcat === 'spot' && dwin === 'all') dwin = 'week'; }
+  if (b.dataset.win) { if (dcat === 'spot' && b.dataset.win === 'all') return; dwin = b.dataset.win; }
+  $('#dtabs').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.cat === dcat || x.dataset.win === dwin)));
+  $('#dtabs [data-win="all"]').disabled = dcat === 'spot';
+  loadDiscover(); };
+$('#dfilter').oninput = renderDiscover;
+$('#discover').onclick = async ev => { const b = ev.target.closest('[data-follow]'); if (!b) return;
+  b.disabled = true; b.textContent = '…';
+  try { await api('/api/traders', {method:'POST', body: JSON.stringify({address: b.dataset.follow, label: b.dataset.name})});
+        drows.forEach(r => { if (r.address === b.dataset.follow) r.tracked = true; }); renderDiscover(); refresh(); }
+  catch (e) { b.disabled = false; b.textContent = 'Follow'; $('#dnote').textContent = e.message; } };
+
+function renderDryrun(d) {
+  const s = d.summary, n = s.n || 0;
+  $('#drstats').innerHTML = `<div>Checked<b>${n}</b></div><div>Would execute<b class="up">${s.ok || 0}</b></div><div>Blocked<b class="${s.blocked ? 'down' : ''}">${s.blocked || 0}</b></div><div>Quote errors<b>${s.errors || 0}</b></div><div>Avg cost vs mid<b>${s.avg_impact == null ? '–' : Math.round(s.avg_impact) + ' bps'}</b></div>`;
+  table($('#dryrun'), ['When','Trader','Side','Token','>Size','>Paper px','>Quote px','>Cost vs mid','Result'], d.rows.map(r => `<tr>
+    <td>${ago(r.ts)}</td><td>${esc(r.label || short(r.source))}</td><td>${r.side === 'buy' ? '<span class="up">Buy</span>' : '<span class="down">Sell</span>'}</td><td title="${esc(r.mint)}">${esc(r.symbol)}</td>
+    <td class="r num">${usd(r.usd)}</td><td class="r num">${px(r.paper_px)}</td><td class="r num">${px(r.exec_px)}</td><td class="r num">${r.impact_bps == null ? '–' : Math.round(r.impact_bps) + ' bps'}</td>
+    <td style="white-space:normal">${r.status === 'ok' ? 'Would execute' : r.status === 'blocked' ? '<span class="down">Blocked</span>' : 'Quote error'}${r.detail ? ` <span style="color:var(--muted)">· ${esc(r.detail)}</span>` : ''}</td></tr>`),
+    d.enabled ? 'Nothing yet. Every spot copy trade gets a real Jupiter quote here, at live size. Nothing is signed or sent.' : 'Dry run is off (DRYRUN_ENABLED=false).');
+  const L = d.limits;
+  $('#drnote').textContent = `Live limits being tested: max ${usd(L.max_trade_usd)} per trade, max ${L.max_slippage_bps} bps worse than mid, stop buying after ${usd(L.daily_loss_usd)} daily loss.` +
+    (d.wallet_set ? ' SOL balance checked against your wallet.' : ' Set DRYRUN_SOL_WALLET (public address) to also check your SOL balance.');
+}
+
 $('#add').onsubmit = async ev => { ev.preventDefault(); $('#msg').textContent = '';
   try { await api('/api/traders', {method:'POST', body: JSON.stringify({address: $('#addr').value, label: $('#label').value})}); $('#addr').value = $('#label').value = ''; refresh(); }
   catch (e) { $('#msg').textContent = e.message; } };
@@ -208,7 +286,7 @@ $('#seed').onclick = async () => { $('#msg').textContent = 'Fetching Hyperliquid
 $('#traders').onclick = async ev => { const a = ev.target.dataset.rm; if (!a) return;
   try { await api('/api/traders/' + a, {method:'DELETE'}); refresh(); } catch (e) { $('#msg').textContent = e.message; } };
 addEventListener('resize', drawChart);
-refresh(); setInterval(refresh, 10000);
+refresh(); loadDiscover(); setInterval(refresh, 10000);
 </script>
 </body>
 </html>

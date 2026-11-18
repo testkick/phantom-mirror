@@ -178,6 +178,11 @@ def test_demo_end_to_end_and_api(tmp_path):
     assert len(c.get("/api/traders").json()) == 7
     assert c.get("/api/events").json()
     assert len(c.get("/api/equity").json()["copy"]) > 10
+    dr = c.get("/api/dryrun").json()
+    assert dr["summary"]["n"] > 0 and dr["summary"]["ok"] > 0
+    sug = c.get("/api/discover?category=spot&window=week").json()
+    assert len(sug) == 8 and not sug[0]["tracked"]
+    assert c.get("/api/discover?category=spot&window=all").status_code == 400
     assert c.post("/api/traders", json={"address": "0x" + "9" * 40}).status_code == 401
     assert c.post("/api/traders", json={"address": "@scotty78"}, headers={"x-admin-token": "secret"}).status_code == 400
     assert c.post("/api/traders", json={"address": "not-an-address"}, headers={"x-admin-token": "secret"}).status_code == 400

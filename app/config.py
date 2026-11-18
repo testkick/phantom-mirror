@@ -65,10 +65,27 @@ class Config:
     spot_min_liquidity_usd: float = field(default_factory=lambda: _f("SPOT_MIN_LIQUIDITY_USD", 50_000))  # entry filter
     spot_price_refresh_seconds: float = field(default_factory=lambda: _f("SPOT_PRICE_REFRESH_SECONDS", 300))
 
+    # --- trader suggestions ---
+    solanatracker_api_key: str = field(default_factory=lambda: os.getenv("SOLANATRACKER_API_KEY", ""))
+    solanatracker_base: str = field(default_factory=lambda: os.getenv("SOLANATRACKER_BASE", "https://data.solanatracker.io"))
+    discover_limit: int = field(default_factory=lambda: _i("DISCOVER_LIMIT", 15))
+    discover_min_account_usd: float = field(default_factory=lambda: _f("DISCOVER_MIN_ACCOUNT_USD", 25_000))
+    discover_cache_seconds: float = field(default_factory=lambda: _f("DISCOVER_CACHE_SECONDS", 1800))
+
+    # --- dry run: live-execution check for spot copy (nothing is signed or sent) ---
+    dryrun_enabled: bool = field(default_factory=lambda: _b("DRYRUN_ENABLED", True))
+    dryrun_sol_wallet: str = field(default_factory=lambda: os.getenv("DRYRUN_SOL_WALLET", ""))  # PUBLIC address only
+    live_max_trade_usd: float = field(default_factory=lambda: _f("LIVE_MAX_TRADE_USD", 100))
+    live_max_slippage_bps: float = field(default_factory=lambda: _f("LIVE_MAX_SLIPPAGE_BPS", 300))
+    live_daily_loss_usd: float = field(default_factory=lambda: _f("LIVE_DAILY_LOSS_USD", 100))
+    live_sol_reserve: float = field(default_factory=lambda: _f("LIVE_SOL_RESERVE", 0.05))  # keep for fees
+
     def public(self) -> dict:
         d = dict(self.__dict__)
         d.pop("admin_token", None)
         d.pop("jup_api_key", None)
+        d.pop("solanatracker_api_key", None)
+        d["spot_suggestions_enabled"] = bool(self.solanatracker_api_key) or self.demo_mode
         d.pop("solana_rpc_url", None)  # may embed an API key
         d["admin_required"] = bool(self.admin_token)
         return d

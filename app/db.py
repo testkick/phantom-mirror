@@ -77,6 +77,20 @@ CREATE TABLE IF NOT EXISTS tokens (
     symbol TEXT NOT NULL,
     name   TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS dryrun (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    fill_id    INTEGER NOT NULL,
+    ts         REAL NOT NULL,
+    source     TEXT NOT NULL,
+    mint       TEXT NOT NULL,
+    side       TEXT NOT NULL,                       -- buy | sell
+    usd        REAL NOT NULL,                       -- size a live account would trade
+    paper_px   REAL NOT NULL,
+    exec_px    REAL,                                -- from a real Jupiter quote
+    impact_bps REAL,                                -- adverse vs mid
+    status     TEXT NOT NULL,                       -- ok | blocked | error
+    detail     TEXT NOT NULL DEFAULT ''
+);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_fills_ts ON paper_fills(ts);
 CREATE INDEX IF NOT EXISTS idx_equity_ts ON equity(strategy, ts);
