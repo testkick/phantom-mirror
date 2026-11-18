@@ -65,7 +65,7 @@ class Discovery:
         if not key:
             raise RuntimeError("Set SOLANATRACKER_API_KEY on the service to see spot suggestions.")
         days = SPOT_WINDOWS[window]
-        params = {"sort": "realized", "direction": "desc", "limit": self.cfg.discover_limit, "days": days,
+        params = {"sort": "realized", "direction": "desc", "limit": 100, "days": days,  # over-fetch; filtered below
                   "excludeArbitrage": "true", "minTrades": 20, "minDays": min(3, days),
                   # skip one-hit wonders whose whole profit came from a single token
                   "maxSingleTokenPct": 80}
@@ -73,11 +73,21 @@ class Discovery:
             r = await c.get(f"{self.cfg.solanatracker_base}/v2/pnl/leaderboard/top", params=params)
             r.raise_for_status()
             traders = r.json().get("traders", [])
+        cfg = self.cfg
         out = []
         for t in traders:
             period = t.get("period") or {}
             ident = t.get("identity") or {}
             if ident.get("type") == "bot":
+                continue
+            trades = (t.get("counts") or {}).get("trades") or 0
+            wr = t.get("winRate") if t.get("winRate") is not None else (period.get("days") or {}).get("winRate")
+            roi = float(period.get("roi") or 0) / 100
+            if trades > cfg.discover_spot_max_trades_per_day * days:   # too fast to copy by polling
+                continue
+            if wr is not None and wr > cfg.discover_spot_max_win_rate:  # snipers / insiders
+                continue
+            if roi > cfg.discover_spot_max_roi:                          # launch-entry returns nobody can match
                 continue
             out.append({"address": t["wallet"], "chain": "sol", "name": ident.get("name") or "",
                         "twitter": ident.get("twitter") or "", "pnl": float(period.get("realized") or 0),
@@ -85,7 +95,7 @@ class Discovery:
                         "volume": float(period.get("volume") or 0),
                         "win_rate": (t.get("winRate") if t.get("winRate") is not None else (period.get("days") or {}).get("winRate")),
                         "trades": (t.get("counts") or {}).get("trades")})
-        return out
+        return out[:cfg.discover_limit]
 
 
 class DemoDiscovery:

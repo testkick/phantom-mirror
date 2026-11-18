@@ -249,7 +249,7 @@ function renderDiscover() {
     derr || (f ? 'No matches.' : 'No traders returned for this window.'));
   $('#dnote').textContent = dcat === 'perps'
     ? 'Hyperliquid-wide leaderboard (every Phantom perps trader is on it, but it isn’t Phantom’s own Top Traders list and has no Phantom usernames). Accounts under $25K hidden.'
-    : 'Solana Tracker PnL leaderboard: arbitrage bots excluded, at least 20 trades, no single token over 80% of profit. Names come from public labels, not Phantom usernames.';
+    : 'Solana Tracker PnL leaderboard, filtered to copyable wallets: no arbitrage or high-frequency bots (max 300 trades/day), no 95%+ win rates or 50×+ returns (launch snipers, likely insiders), at least 20 trades, no single token over 80% of profit. Names come from public labels, not Phantom usernames.';
 }
 $('#dtabs').onclick = ev => { const b = ev.target.closest('button'); if (!b) return;
   if (b.dataset.cat) { dcat = b.dataset.cat; if (dcat === 'spot' && dwin === 'all') dwin = 'week'; }

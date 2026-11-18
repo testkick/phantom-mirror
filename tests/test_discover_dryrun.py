@@ -44,7 +44,10 @@ def test_spot_suggestions_need_key_and_parse(monkeypatch):
         return httpx.Response(200, json={"traders": [
             {"wallet": "W1", "winRate": 61.5, "period": {"realized": 12345, "roi": 250, "volume": 1e5},
              "counts": {"trades": 80}, "identity": {"name": "alice", "twitter": "alice_x"}},
-            {"wallet": "W2", "period": {"realized": 9}, "identity": {"type": "bot"}}]})
+            {"wallet": "W2", "period": {"realized": 9}, "identity": {"type": "bot"}},
+            {"wallet": "HFT", "winRate": 40, "period": {"realized": 9e6, "roi": 30}, "counts": {"trades": 168760}},
+            {"wallet": "SNIPER", "winRate": 100, "period": {"realized": 2e6, "roi": 600000}, "counts": {"trades": 200}},
+            {"wallet": "MOON", "winRate": 60, "period": {"realized": 1e6, "roi": 9000}, "counts": {"trades": 100}}]})
     patch_http(monkeypatch, handler)
     cfg.solanatracker_api_key = "k"
     out = asyncio.run(Discovery(cfg).get("spot", "day"))

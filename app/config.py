@@ -70,6 +70,10 @@ class Config:
     solanatracker_base: str = field(default_factory=lambda: os.getenv("SOLANATRACKER_BASE", "https://data.solanatracker.io"))
     discover_limit: int = field(default_factory=lambda: _i("DISCOVER_LIMIT", 15))
     discover_min_account_usd: float = field(default_factory=lambda: _f("DISCOVER_MIN_ACCOUNT_USD", 25_000))
+    # spot copyability filters: drop HFT bots, launch snipers and likely insiders
+    discover_spot_max_trades_per_day: float = field(default_factory=lambda: _f("DISCOVER_SPOT_MAX_TRADES_PER_DAY", 300))
+    discover_spot_max_win_rate: float = field(default_factory=lambda: _f("DISCOVER_SPOT_MAX_WIN_RATE", 95))
+    discover_spot_max_roi: float = field(default_factory=lambda: _f("DISCOVER_SPOT_MAX_ROI", 50))  # 50 = 5,000%
     discover_cache_seconds: float = field(default_factory=lambda: _f("DISCOVER_CACHE_SECONDS", 1800))
 
     # --- dry run: live-execution check for spot copy (nothing is signed or sent) ---
