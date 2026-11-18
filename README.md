@@ -1,6 +1,7 @@
 # PhantomMirror
 
-Monitors Phantom's top perps traders and paper-mirrors them with two strategies side by side.
+Monitors Phantom top traders and paper-mirrors them with three strategies side by side:
+perps 1:1 copy, perps consensus, and Solana spot copy.
 
 Phantom perps run on Hyperliquid, and each Phantom account trades there under its 0x (Ethereum-format)
 address. Hyperliquid's info API is public, so once you have a trader's 0x address you can read their
@@ -24,6 +25,22 @@ Positions a trader already held when you started tracking them are marked `pre` 
 (their entry price is stale). They do count toward consensus unless `CONSENSUS_INCLUDE_EXISTING=false`.
 
 Fills are simulated at mid plus/minus `SLIPPAGE_BPS`, with `FEE_BPS` charged per side.
+
+## Spot traders (Solana)
+
+Paste a Solana wallet address instead of a 0x address and the trader is tracked as spot.
+Every poll reads the wallet's SOL balance and token accounts (SPL and Token-2022) from
+`SOLANA_RPC_URL`, prices them with Jupiter Price V3, and diffs against the last snapshot:
+`buy`, `buy more`, `sell part`, `sell all`. SOL, USDC and USDT count as cash and are never mirrored.
+
+**Spot copy** gives each spot trader `SPOT_ALLOC_USD` and holds each token at the same share
+of portfolio value the trader does, capped at `SPOT_MAX_POSITION_PCT`. New entries are skipped
+when Jupiter reports liquidity below `SPOT_MIN_LIQUIDITY_USD`. Bags held before tracking started
+are tagged `pre` and not copied, same as perps.
+
+Limits: a buy and sell inside one poll interval is invisible; prices are Jupiter mid prices with a
+flat slippage assumption, which flatters thin memecoins; the public Solana RPC rate-limits hard, so
+set `SOLANA_RPC_URL` to a provider endpoint for more than a couple of wallets.
 
 ## Run locally
 

@@ -10,10 +10,11 @@ Not modelled: funding payments, liquidations, order-book depth (fills are mid +/
 """
 from .config import Config
 from .db import DB
+from .sol import CASH_MINTS, SOL_MINT
 
 EPS = 1e-12
 CONSENSUS_SOURCE = "consensus"
-STRATEGIES = ("copy", "consensus")
+STRATEGIES = ("copy", "consensus", "spot_copy")
 
 
 def _sign(x: float) -> int:
@@ -79,13 +80,14 @@ class Engine:
         return events
 
     # ------------------------------------------------------------------ paper execution
-    def fill(self, strategy: str, source: str, coin: str, delta: float, mid: float, now: float, reason: str) -> None:
+    def fill(self, strategy: str, source: str, coin: str, delta: float, mid: float, now: float, reason: str,
+             fee_bps: float | None = None, slippage_bps: float | None = None) -> None:
         """Apply a simulated market order of signed size `delta` at mid +/- slippage."""
         if abs(delta) <= EPS or not mid or mid <= 0:
             return
-        slip = self.cfg.slippage_bps / 1e4
+        slip = (self.cfg.slippage_bps if slippage_bps is None else slippage_bps) / 1e4
         px = mid * (1 + slip) if delta > 0 else mid * (1 - slip)
-        fee = abs(delta) * px * self.cfg.fee_bps / 1e4
+        fee = abs(delta) * px * (self.cfg.fee_bps if fee_bps is None else fee_bps) / 1e4
         db = self.db
         cur = db.one("SELECT * FROM paper_positions WHERE strategy=? AND source=? AND coin=?", (strategy, source, coin))
         size = cur["size"] if cur else 0.0
@@ -216,6 +218,100 @@ class Engine:
     def run_strategies(self, mids: dict, now: float) -> None:
         self.run_copy(mids, now)
         self.run_consensus(mids, now)
+
+    # ------------------------------------------------------------------ spot monitoring (Solana)
+    def ingest_spot(self, address: str, holdings: dict, prices: dict[str, dict], now: float) -> list[dict]:
+        """Diff a Solana wallet's token balances against the stored snapshot.
+        SOL/USDC/USDT are cash: they count toward portfolio value but produce no events."""
+        db = self.db
+        trader = db.one("SELECT * FROM traders WHERE address=?", (address,))
+        if trader is None:
+            return []
+        first = not trader["baselined"]
+        new = {m: a for m, a in holdings["tokens"].items() if m not in CASH_MINTS}
+        prev = {r["mint"]: r for r in db.q("SELECT * FROM spot_holdings WHERE address=?", (address,))}
+        events: list[dict] = []
+        for mint in set(prev) | set(new):
+            p = prev.get(mint)
+            old_amt = p["amount"] if p else 0.0
+            new_amt = new.get(mint, 0.0)
+            if abs(new_amt - old_amt) <= 1e-9 * max(old_amt, new_amt, 1e-9):
+                continue
+            if first:
+                baseline, kind = (0 if self.cfg.copy_existing else 1), None
+            elif old_amt <= EPS:
+                baseline, kind = 0, "buy"
+            elif new_amt <= EPS:
+                baseline, kind = 0, "sell all"
+            else:
+                baseline = p["baseline"]
+                kind = "buy more" if new_amt > old_amt else "sell part"
+            if new_amt <= EPS:
+                db.x("DELETE FROM spot_holdings WHERE address=? AND mint=?", (address, mint))
+            else:
+                db.x("INSERT INTO spot_holdings(address,mint,amount,baseline,updated_at) VALUES(?,?,?,?,?) "
+                     "ON CONFLICT(address,mint) DO UPDATE SET amount=excluded.amount, baseline=excluded.baseline, "
+                     "updated_at=excluded.updated_at", (address, mint, new_amt, baseline, now))
+            if kind:
+                px = (prices.get(mint) or {}).get("price")
+                ev = {"ts": now, "address": address, "coin": mint, "kind": kind,
+                      "prev_szi": old_amt, "new_szi": new_amt, "px": px}
+                db.x("INSERT INTO events(ts,address,coin,kind,prev_szi,new_szi,px) VALUES(?,?,?,?,?,?,?)",
+                     tuple(ev.values()))
+                events.append(ev)
+
+        sol_px = (prices.get(SOL_MINT) or {}).get("price") or 0.0
+        value = holdings["sol"] * sol_px
+        for m, a in holdings["tokens"].items():
+            pr = (prices.get(m) or {}).get("price")
+            if pr:
+                value += a * pr
+        # keep the previous value if SOL couldn't be priced this round
+        db.x("UPDATE traders SET baselined=1, account_value=CASE WHEN ?>0 THEN ? ELSE account_value END, "
+             "last_seen=?, last_error=NULL WHERE address=?", (sol_px, value, now, address))
+        return events
+
+    # ------------------------------------------------------------------ strategy C: spot copy
+    def run_spot_copy(self, prices: dict[str, dict], now: float) -> None:
+        """Each spot trader gets SPOT_ALLOC_USD; each holding is mirrored at the same share of
+        portfolio value, capped at SPOT_MAX_POSITION_PCT. New entries need minimum liquidity."""
+        cfg = self.cfg
+        targets: dict[tuple[str, str], float] = {}
+        for r in self.db.q(
+            "SELECT h.address, h.mint, h.amount, t.account_value FROM spot_holdings h "
+            "JOIN traders t ON t.address=h.address WHERE t.active=1 AND t.chain='sol' AND h.baseline=0"
+        ):
+            pr = prices.get(r["mint"])
+            av = r["account_value"] or 0.0
+            if not pr or av < cfg.min_account_value:
+                continue
+            tgt = r["amount"] * cfg.spot_alloc_usd / av
+            cap = cfg.spot_alloc_usd * cfg.spot_max_position_pct / pr["price"]
+            targets[(r["address"], r["mint"])] = min(tgt, cap)
+        current = {(r["source"], r["coin"]): r["size"]
+                   for r in self.db.q("SELECT * FROM paper_positions WHERE strategy='spot_copy'")}
+        for key in set(targets) | set(current):
+            source, mint = key
+            pr = prices.get(mint)
+            if not pr:
+                continue  # no price this round: never sell blind
+            cur, tgt = current.get(key, 0.0), targets.get(key, 0.0)
+            if tgt * pr["price"] < cfg.min_order_usd:
+                tgt = 0.0
+            if cur == 0 and tgt == 0:
+                continue
+            if tgt == 0:
+                reason = "trader sold"
+            elif cur == 0:
+                if pr["liquidity"] < cfg.spot_min_liquidity_usd:
+                    continue  # too thin to enter
+                reason = "trader bought"
+            elif abs(tgt - cur) / cur > cfg.copy_rebalance_threshold:
+                reason = "trader resized"
+            else:
+                continue
+            self.fill("spot_copy", source, mint, tgt - cur, pr["price"], now, reason,
+                      fee_bps=cfg.spot_fee_bps, slippage_bps=cfg.spot_slippage_bps)
 
     # ------------------------------------------------------------------ accounting
     def stats(self, strategy: str, mids: dict) -> dict:

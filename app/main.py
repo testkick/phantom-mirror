@@ -1,4 +1,9 @@
-"""PhantomMirror - monitor Phantom perps top traders (via Hyperliquid) and paper-mirror them."""
+"""PhantomMirror - monitor Phantom top traders and paper-mirror them.
+
+Two sources:
+  hl  - perps traders, read from Hyperliquid by 0x address
+  sol - spot traders, read from Solana by wallet address (holdings diffed between polls)
+"""
 import asyncio
 import logging
 import os
@@ -14,6 +19,7 @@ from .config import Config
 from .db import DB
 from .engine import STRATEGIES, Engine
 from .hl import DemoClient, HLClient
+from .sol import CASH_MINTS, SOL_ADDR_RE, SOL_MINT, DemoSolClient, SolClient
 
 log = logging.getLogger("phantom-mirror")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -27,7 +33,11 @@ class State:
     db: DB
     engine: Engine
     hl: object
-    mids: dict = {}
+    sol: object
+    mids: dict = {}                    # perp coin -> mid
+    spot_px: dict = {}                 # mint -> {price, liquidity, ts}
+    symbols: dict = {}                 # mint -> symbol
+    price_miss: dict = {}              # mint -> ts Jupiter last returned no price
     last_poll: float | None = None
     last_poll_error: str | None = None
     last_equity_snapshot: float = 0.0
@@ -36,23 +46,106 @@ class State:
 S = State()
 
 
-async def poll_once(now: float | None = None) -> None:
-    now = now or time.time()
+def marks() -> dict:
+    """Perp mids and spot prices in one coin -> price map (mints never collide with tickers)."""
+    return {**S.mids, **{m: v["price"] for m, v in S.spot_px.items()}}
+
+
+def sym(coin: str) -> str:
+    if coin in S.symbols:
+        return S.symbols[coin]
+    return coin if len(coin) <= 12 else f"{coin[:4]}…{coin[-4:]}"
+
+
+def _err(address: str, e: Exception) -> None:
+    S.db.x("UPDATE traders SET last_error=? WHERE address=?", (f"{type(e).__name__}: {e}"[:300], address))
+    log.warning("fetch failed for %s: %s", address, e)
+
+
+async def poll_perps(now: float) -> None:
+    traders = S.db.q("SELECT address FROM traders WHERE active=1 AND chain='hl'")
     mids = await S.hl.all_mids()
     S.mids = mids
-    for t in S.db.q("SELECT address FROM traders WHERE active=1"):
+    for t in traders:
         try:
             state = await S.hl.state(t["address"])
             for ev in S.engine.ingest_trader(t["address"], state, mids, now):
                 log.info("EVENT %s %s %s %.6g -> %.6g", ev["address"][:10], ev["kind"], ev["coin"], ev["prev_szi"], ev["new_szi"])
         except Exception as e:  # a failed fetch must never be read as "trader went flat"
-            S.db.x("UPDATE traders SET last_error=? WHERE address=?", (f"{type(e).__name__}: {e}"[:300], t["address"]))
-            log.warning("fetch failed for %s: %s", t["address"], e)
+            _err(t["address"], e)
     S.engine.run_strategies(mids, now)
+
+
+async def poll_spot(now: float) -> None:
+    traders = S.db.q("SELECT address FROM traders WHERE active=1 AND chain='sol'")
+    held_paper = {r["coin"] for r in S.db.q("SELECT coin FROM paper_positions WHERE strategy='spot_copy'")}
+    if not traders and not held_paper:
+        return
+    snaps: dict[str, dict] = {}
+    for t in traders:
+        try:
+            snaps[t["address"]] = await S.sol.holdings(t["address"])
+        except Exception as e:
+            _err(t["address"], e)
+
+    # Price what can trade this round on every poll; everything else (dust, pre-existing bags)
+    # only every SPOT_PRICE_REFRESH_SECONDS, for portfolio value.
+    stored = {(r["address"], r["mint"]): r for r in S.db.q("SELECT * FROM spot_holdings")}
+    hot, cold = {SOL_MINT} | held_paper, set()
+    for addr, snap in snaps.items():
+        for mint, amt in snap["tokens"].items():
+            if mint in CASH_MINTS:
+                continue
+            r = stored.get((addr, mint))
+            fresh = r is None or not r["baseline"] or r["amount"] != amt
+            # unpriceable tokens back off even when "hot", or junk airdrops would be re-queried every poll
+            if fresh and now - S.price_miss.get(mint, 0) >= S.cfg.spot_price_refresh_seconds:
+                hot.add(mint)
+            else:
+                cold.add(mint)
+    last = lambda m: S.spot_px.get(m, {}).get("ts") or S.price_miss.get(m, 0)
+    stale = [m for m in cold - hot if now - last(m) >= S.cfg.spot_price_refresh_seconds]
+    want = list(hot) + stale
+    if want:
+        got = await S.sol.prices(want)
+        for m in want:
+            if m in got:
+                S.spot_px[m] = {**got[m], "ts": now}
+                S.price_miss.pop(m, None)
+            else:  # Jupiter has no reliable price: back off like a cold token
+                S.price_miss[m] = now
+
+    for addr, snap in snaps.items():
+        for ev in S.engine.ingest_spot(addr, snap, S.spot_px, now):
+            log.info("SPOT %s %s %s %.6g -> %.6g", addr[:8], ev["kind"], sym(ev["coin"]), ev["prev_szi"], ev["new_szi"])
+
+    unknown = [m for m in S.spot_px if m not in S.symbols]
+    if unknown:
+        try:
+            info = await S.sol.token_info(unknown)
+            for m in unknown:  # cache misses too, so we don't ask again every poll
+                s = info.get(m, {}).get("symbol") or sym(m)
+                S.symbols[m] = s
+                S.db.x("INSERT OR REPLACE INTO tokens(mint,symbol,name) VALUES(?,?,?)", (m, s, info.get(m, {}).get("name", "")))
+        except Exception as e:
+            log.warning("token info failed: %s", e)
+
+    S.engine.run_spot_copy(S.spot_px, now)
+
+
+async def poll_once(now: float | None = None) -> None:
+    now = now or time.time()
+    errors = []
+    for name, fn in (("perps", poll_perps), ("spot", poll_spot)):
+        try:
+            await fn(now)
+        except Exception as e:  # one source failing must not stop the other
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+            log.exception("%s poll failed", name)
     if now - S.last_equity_snapshot >= S.cfg.equity_snapshot_seconds:
-        S.engine.snapshot_equity(mids, now)
+        S.engine.snapshot_equity(marks(), now)
         S.last_equity_snapshot = now
-    S.last_poll, S.last_poll_error = now, None
+    S.last_poll, S.last_poll_error = now, ("; ".join(errors) or None)
 
 
 async def poll_loop() -> None:
@@ -71,14 +164,20 @@ def init_state(cfg: Config | None = None, db_path: str | None = None) -> None:
     S.cfg = cfg or Config()
     S.db = DB(db_path or os.path.join(S.cfg.data_dir, "phantom_mirror.db"))
     S.engine = Engine(S.db, S.cfg)
-    S.mids, S.last_poll, S.last_poll_error, S.last_equity_snapshot = {}, None, None, 0.0
+    S.mids, S.spot_px, S.price_miss = {}, {}, {}
+    S.last_poll, S.last_poll_error, S.last_equity_snapshot = None, None, 0.0
+    S.symbols = {r["mint"]: r["symbol"] for r in S.db.q("SELECT * FROM tokens")}
     if S.cfg.demo_mode:
-        S.hl = DemoClient()
+        S.hl, S.sol = DemoClient(), DemoSolClient()
         for addr, name in DemoClient.TRADERS.items():
-            S.db.x("INSERT OR IGNORE INTO traders(address,label,source,added_at) VALUES(?,?,?,?)",
-                   (addr, name, "demo", time.time()))
+            S.db.x("INSERT OR IGNORE INTO traders(address,label,source,chain,added_at) VALUES(?,?,?,?,?)",
+                   (addr, name, "demo", "hl", time.time()))
+        for addr, name in DemoSolClient.WALLETS.items():
+            S.db.x("INSERT OR IGNORE INTO traders(address,label,source,chain,added_at) VALUES(?,?,?,?,?)",
+                   (addr, name, "demo", "sol", time.time()))
     else:
         S.hl = HLClient(S.cfg.hl_info_url, S.cfg.hl_leaderboard_url, S.cfg.hl_dexs)
+        S.sol = SolClient(S.cfg.solana_rpc_url, S.cfg.jup_api_base, S.cfg.jup_api_key)
 
 
 @asynccontextmanager
@@ -89,6 +188,7 @@ async def lifespan(app: FastAPI):
     yield
     task.cancel()
     await S.hl.close()
+    await S.sol.close()
 
 
 app = FastAPI(title="PhantomMirror", lifespan=lifespan)
@@ -108,35 +208,50 @@ def healthz():
 
 @app.get("/api/summary")
 def summary():
+    m = marks()
     return {
         "now": time.time(), "last_poll": S.last_poll, "last_poll_error": S.last_poll_error,
-        "strategies": [S.engine.stats(s, S.mids) for s in STRATEGIES],
+        "strategies": [S.engine.stats(s, m) for s in STRATEGIES],
         "config": S.cfg.public(),
     }
 
 
 @app.get("/api/traders")
 def traders():
+    m = marks()
     rows = S.db.q("SELECT * FROM traders ORDER BY active DESC, added_at")
-    pos = S.db.q("SELECT * FROM trader_positions")
-    copy_pnl = {r["source"]: r for r in S.db.q(
-        "SELECT source, SUM(realized_pnl)-SUM(fee) net, SUM(closing) closes FROM paper_fills "
-        "WHERE strategy='copy' GROUP BY source")}
+    perp_pos = S.db.q("SELECT * FROM trader_positions")
+    spot_pos = S.db.q("SELECT * FROM spot_holdings")
+    pnl = {(r["strategy"], r["source"]): r["net"] for r in S.db.q(
+        "SELECT strategy, source, SUM(realized_pnl)-SUM(fee) net FROM paper_fills GROUP BY strategy, source")}
     for r in rows:
-        r["positions"] = [dict(p, notional=abs(p["szi"]) * S.mids.get(p["coin"], p["entry_px"] or 0))
-                          for p in pos if p["address"] == r["address"]]
-        unreal = sum(p["size"] * (S.mids.get(p["coin"], p["entry_px"]) - p["entry_px"]) for p in S.db.q(
-            "SELECT * FROM paper_positions WHERE strategy='copy' AND source=?", (r["address"],)))
-        c = copy_pnl.get(r["address"])
-        r["copy_pnl"] = (c["net"] if c else 0.0) + unreal
+        strat = "spot_copy" if r["chain"] == "sol" else "copy"
+        if r["chain"] == "sol":
+            pos = [dict(coin=p["mint"], symbol=sym(p["mint"]), szi=p["amount"], baseline=p["baseline"],
+                        notional=p["amount"] * m[p["mint"]] if p["mint"] in m else None)
+                   for p in spot_pos if p["address"] == r["address"]]
+            pos = sorted((p for p in pos if (p["notional"] or 0) >= 1 or not p["baseline"]),
+                         key=lambda p: -(p["notional"] or 0))
+            r["more_positions"] = max(0, len(pos) - 8)
+            pos = pos[:8]
+        else:
+            pos = [dict(p, symbol=p["coin"], notional=abs(p["szi"]) * m.get(p["coin"], p["entry_px"] or 0))
+                   for p in perp_pos if p["address"] == r["address"]]
+            r["more_positions"] = 0
+        r["positions"] = pos
+        unreal = sum(p["size"] * (m.get(p["coin"], p["entry_px"]) - p["entry_px"]) for p in S.db.q(
+            "SELECT * FROM paper_positions WHERE strategy=? AND source=?", (strat, r["address"])))
+        r["copy_pnl"] = pnl.get((strat, r["address"]), 0.0) + unreal
     return rows
 
 
 @app.get("/api/positions")
 def positions():
+    m = marks()
     rows = S.db.q("SELECT * FROM paper_positions ORDER BY strategy, opened_at DESC")
     for r in rows:
-        mid = S.mids.get(r["coin"])
+        mid = m.get(r["coin"])
+        r["symbol"] = sym(r["coin"])
         r["mid"] = mid
         r["unrealized"] = r["size"] * (mid - r["entry_px"]) if mid else None
         r["notional"] = abs(r["size"]) * (mid or r["entry_px"])
@@ -151,13 +266,19 @@ def consensus():
 
 @app.get("/api/events")
 def events(limit: int = 100):
-    return S.db.q("SELECT e.*, t.label FROM events e LEFT JOIN traders t ON t.address=e.address "
+    rows = S.db.q("SELECT e.*, t.label, t.chain FROM events e LEFT JOIN traders t ON t.address=e.address "
                   "ORDER BY e.id DESC LIMIT ?", (min(limit, 1000),))
+    for r in rows:
+        r["symbol"] = sym(r["coin"])
+    return rows
 
 
 @app.get("/api/fills")
 def fills(limit: int = 100):
-    return S.db.q("SELECT * FROM paper_fills ORDER BY id DESC LIMIT ?", (min(limit, 1000),))
+    rows = S.db.q("SELECT * FROM paper_fills ORDER BY id DESC LIMIT ?", (min(limit, 1000),))
+    for r in rows:
+        r["symbol"] = sym(r["coin"])
+    return rows
 
 
 @app.get("/api/equity")
@@ -182,12 +303,23 @@ class SeedIn(BaseModel):
     min_account_value: float = 50_000
 
 
+def normalize(address: str) -> tuple[str, str]:
+    """-> (address, chain). 0x addresses are perps (Hyperliquid); base58 are Solana spot wallets."""
+    a = address.strip()
+    if ADDR_RE.match(a):
+        return a.lower(), "hl"
+    if SOL_ADDR_RE.match(a):
+        return a, "sol"  # base58 is case-sensitive: never lowercase
+    if a.startswith("@"):
+        raise HTTPException(400, "Phantom usernames can't be looked up automatically. Open the profile in Phantom and "
+                                 "paste their address instead: 0x… for perps traders, the Solana address for spot traders.")
+    raise HTTPException(400, "Enter a 0x address (perps trader) or a Solana wallet address (spot trader).")
+
+
 def _add(address: str, label: str, source: str) -> bool:
-    address = address.strip().lower()
-    if not ADDR_RE.match(address):
-        raise HTTPException(400, "address must be a 0x Ethereum-format address (Phantom perps accounts are 0x addresses, not Solana addresses)")
-    n = S.db.x("INSERT OR IGNORE INTO traders(address,label,source,added_at) VALUES(?,?,?,?)",
-               (address, label.strip()[:60], source, time.time()))
+    address, chain = normalize(address)
+    n = S.db.x("INSERT OR IGNORE INTO traders(address,label,source,chain,added_at) VALUES(?,?,?,?,?)",
+               (address, label.strip()[:60], source, chain, time.time()))
     if not n:  # existed: reactivate, re-baseline so stale positions aren't mirrored
         S.db.x("UPDATE traders SET active=1, baselined=CASE WHEN active=1 THEN baselined ELSE 0 END, "
                "label=CASE WHEN ?<>'' THEN ? ELSE label END WHERE address=?", (label, label.strip()[:60], address))
@@ -196,15 +328,17 @@ def _add(address: str, label: str, source: str) -> bool:
 
 @app.post("/api/traders", dependencies=[Depends(admin)])
 def add_trader(body: TraderIn):
-    return {"added": _add(body.address, body.label, "manual")}
+    return {"added": _add(body.address, body.label.lstrip("@"), "manual")}
 
 
 @app.delete("/api/traders/{address}", dependencies=[Depends(admin)])
 def remove_trader(address: str):
-    """Deactivate: copy positions for this trader close on the next poll; history is kept."""
-    address = address.lower()
+    """Deactivate: this trader's copy positions close on the next poll; history is kept."""
+    if ADDR_RE.match(address):
+        address = address.lower()
     S.db.x("UPDATE traders SET active=0 WHERE address=?", (address,))
     S.db.x("DELETE FROM trader_positions WHERE address=?", (address,))
+    S.db.x("DELETE FROM spot_holdings WHERE address=?", (address,))
     return {"ok": True}
 
 

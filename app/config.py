@@ -54,8 +54,21 @@ class Config:
     consensus_max_positions: int = field(default_factory=lambda: _i("CONSENSUS_MAX_POSITIONS", 10))
     consensus_include_existing: bool = field(default_factory=lambda: _b("CONSENSUS_INCLUDE_EXISTING", True))
 
+    # --- strategy C: Solana spot copy ---
+    solana_rpc_url: str = field(default_factory=lambda: os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"))
+    jup_api_base: str = field(default_factory=lambda: os.getenv("JUP_API_BASE", "https://lite-api.jup.ag"))
+    jup_api_key: str = field(default_factory=lambda: os.getenv("JUP_API_KEY", ""))
+    spot_alloc_usd: float = field(default_factory=lambda: _f("SPOT_ALLOC_USD", 1_000))  # paper equity per spot trader
+    spot_fee_bps: float = field(default_factory=lambda: _f("SPOT_FEE_BPS", 85))  # approximates an in-wallet swap fee; adjust
+    spot_slippage_bps: float = field(default_factory=lambda: _f("SPOT_SLIPPAGE_BPS", 100))
+    spot_max_position_pct: float = field(default_factory=lambda: _f("SPOT_MAX_POSITION_PCT", 0.25))  # of SPOT_ALLOC_USD
+    spot_min_liquidity_usd: float = field(default_factory=lambda: _f("SPOT_MIN_LIQUIDITY_USD", 50_000))  # entry filter
+    spot_price_refresh_seconds: float = field(default_factory=lambda: _f("SPOT_PRICE_REFRESH_SECONDS", 300))
+
     def public(self) -> dict:
         d = dict(self.__dict__)
         d.pop("admin_token", None)
+        d.pop("jup_api_key", None)
+        d.pop("solana_rpc_url", None)  # may embed an API key
         d["admin_required"] = bool(self.admin_token)
         return d

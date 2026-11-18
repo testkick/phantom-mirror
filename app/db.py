@@ -64,6 +64,19 @@ CREATE TABLE IF NOT EXISTS equity (
     realized   REAL NOT NULL,
     unrealized REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS spot_holdings (
+    address    TEXT NOT NULL,
+    mint       TEXT NOT NULL,
+    amount     REAL NOT NULL,                       -- UI units (decimals applied)
+    baseline   INTEGER NOT NULL DEFAULT 0,          -- 1 = already held when tracking began
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (address, mint)
+);
+CREATE TABLE IF NOT EXISTS tokens (
+    mint   TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    name   TEXT NOT NULL DEFAULT ''
+);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_fills_ts ON paper_fills(ts);
 CREATE INDEX IF NOT EXISTS idx_equity_ts ON equity(strategy, ts);
@@ -80,6 +93,10 @@ class DB:
         with self.lock:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.executescript(SCHEMA)
+            # migrations for databases created by earlier versions
+            cols = {r[1] for r in self.conn.execute("PRAGMA table_info(traders)")}
+            if "chain" not in cols:
+                self.conn.execute("ALTER TABLE traders ADD COLUMN chain TEXT NOT NULL DEFAULT 'hl'")
 
     def q(self, sql: str, args: tuple = ()) -> list[dict]:
         with self.lock:

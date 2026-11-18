@@ -172,14 +172,15 @@ def test_demo_end_to_end_and_api(tmp_path):
     c = TestClient(main.app)                                       # no lifespan: state already initialised
     s = c.get("/api/summary").json()
     by = {x["strategy"]: x for x in s["strategies"]}
-    assert by["copy"]["fills"] > 0 and by["consensus"]["fills"] > 0
+    assert by["copy"]["fills"] > 0 and by["consensus"]["fills"] > 0 and by["spot_copy"]["fills"] > 0
     for x in by.values():                                          # accounting identity
         assert x["equity"] == pytest.approx(10_000 + x["realized"] - x["fees"] + x["unrealized"])
-    assert len(c.get("/api/traders").json()) == 5
+    assert len(c.get("/api/traders").json()) == 7
     assert c.get("/api/events").json()
     assert len(c.get("/api/equity").json()["copy"]) > 10
     assert c.post("/api/traders", json={"address": "0x" + "9" * 40}).status_code == 401
-    assert c.post("/api/traders", json={"address": "So1anaAddr"}, headers={"x-admin-token": "secret"}).status_code == 400
+    assert c.post("/api/traders", json={"address": "@scotty78"}, headers={"x-admin-token": "secret"}).status_code == 400
+    assert c.post("/api/traders", json={"address": "not-an-address"}, headers={"x-admin-token": "secret"}).status_code == 400
     assert c.post("/api/traders", json={"address": "0x" + "9" * 40, "label": "x"}, headers={"x-admin-token": "secret"}).json()["added"]
     assert c.delete("/api/traders/" + "0x" + "1" * 40, headers={"x-admin-token": "secret"}).json()["ok"]
     asyncio.run(main.poll_once(now=1_700_100_000))
