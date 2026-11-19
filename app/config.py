@@ -67,6 +67,7 @@ class Config:
     spot_slippage_bps: float = field(default_factory=lambda: _f("SPOT_SLIPPAGE_BPS", 100))
     spot_max_position_pct: float = field(default_factory=lambda: _f("SPOT_MAX_POSITION_PCT", 0.25))  # of SPOT_ALLOC_USD
     spot_min_liquidity_usd: float = field(default_factory=lambda: _f("SPOT_MIN_LIQUIDITY_USD", 50_000))  # entry filter
+    spot_price_calls_per_poll: int = field(default_factory=lambda: _i("SPOT_PRICE_CALLS_PER_POLL", 3))  # x50 tokens; Jupiter free tier limit
     spot_price_refresh_seconds: float = field(default_factory=lambda: _f("SPOT_PRICE_REFRESH_SECONDS", 300))
 
     # --- trader suggestions ---

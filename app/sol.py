@@ -59,13 +59,20 @@ class SolClient:
     async def sol_balance(self, owner: str) -> float:
         return (await self._rpc("getBalance", [owner, {"commitment": "confirmed"}]))["value"] / 1e9
 
-    async def prices(self, mints: list[str]) -> dict[str, dict]:
-        """mint -> {'price', 'liquidity'}; tokens Jupiter can't price reliably are omitted."""
+    async def prices(self, mints: list[str], max_calls: int = 1_000_000) -> dict[str, dict]:
+        """mint -> {'price', 'liquidity', 'decimals'}; tokens Jupiter can't price are omitted.
+        Asks in batches of 50, in the order given, for at most `max_calls` batches. Stops early on a
+        rate limit and returns what it has; `self.priced` lists the mints actually asked about."""
         out: dict[str, dict] = {}
         mints = list(dict.fromkeys(mints))
-        for i in range(0, len(mints), 50):
-            r = await self.jup.get(f"{self.jup_base}/price/v3", params={"ids": ",".join(mints[i:i + 50])})
+        self.priced: list[str] = []
+        for i in range(0, min(len(mints), max_calls * 50), 50):
+            batch = mints[i:i + 50]
+            r = await self.jup.get(f"{self.jup_base}/price/v3", params={"ids": ",".join(batch)})
+            if r.status_code == 429:
+                break
             r.raise_for_status()
+            self.priced += batch
             for mint, d in (r.json() or {}).items():
                 if d and d.get("usdPrice") is not None:
                     out[mint] = {"price": float(d["usdPrice"]), "liquidity": float(d.get("liquidity") or 0),
@@ -132,7 +139,8 @@ class DemoSolClient:
     async def sol_balance(self, owner):
         return 1.5
 
-    async def prices(self, mints):
+    async def prices(self, mints, max_calls=1_000_000):
+        self.priced = list(mints)
         return {m: {"price": self.px[m], "liquidity": self.TOKENS.get(m, ("", 0, 1e9))[2], "decimals": 9 if m == SOL_MINT else 6}
                 for m in mints if m in self.px}
 

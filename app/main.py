@@ -123,10 +123,16 @@ async def poll_spot(now: float) -> None:
                 cold.add(mint)
     last = lambda m: S.spot_px.get(m, {}).get("ts") or S.price_miss.get(m, 0)
     stale = [m for m in cold - hot if now - last(m) >= S.cfg.spot_price_refresh_seconds]
-    want = list(hot) + stale
+    # hot first: SOL, open paper positions, then tokens that just changed; dust refreshes last
+    want = [SOL_MINT] + sorted(held_paper) + sorted(hot - held_paper - {SOL_MINT}) + stale
     if want:
-        got = await S.sol.prices(want)
-        for m in want:
+        try:
+            got = await S.sol.prices(want, max_calls=S.cfg.spot_price_calls_per_poll)
+        except Exception as e:  # never let pricing stop wallets from being recorded
+            log.warning("spot pricing failed: %s", e)
+            got = {}
+        asked = set(getattr(S.sol, "priced", want)) if got else set()  # on failure, mark nothing as unpriceable
+        for m in [m for m in want if m in asked]:
             if m in got:
                 S.spot_px[m] = {**got[m], "ts": now}
                 S.price_miss.pop(m, None)

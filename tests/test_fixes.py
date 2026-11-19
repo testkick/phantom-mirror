@@ -159,3 +159,42 @@ def test_migration_adds_base_from_baseline(tmp_path):
     c.commit(); c.close()
     db = DB(str(path))
     assert {r["mint"]: r["base"] for r in db.q("SELECT * FROM spot_holdings")} == {"m": 42, "n": 0}
+
+
+def test_pricing_rate_limit_still_records_wallets(tmp_path):
+    from app import main
+    cfg = Config()
+    main.init_state(cfg, str(tmp_path / "t.db"))
+    w = "B" * 43 + "1"
+    main.S.db.x("INSERT INTO traders(address,chain,added_at) VALUES(?, 'sol', 0)", (w,))
+
+    class Sol:
+        async def holdings(self, a):
+            return {"sol": 1.0, "tokens": {f"Mint{i:040d}": 1.0 for i in range(10)}}
+        async def prices(self, mints, max_calls=99):
+            raise httpx.HTTPStatusError("429", request=httpx.Request("GET", "https://x"), response=httpx.Response(429))
+        async def token_info(self, mints):
+            return {}
+        async def sol_balance(self, a):
+            return 0.0
+    main.S.sol = Sol()
+    asyncio.run(main.poll_spot(5))
+    assert main.S.db.one("SELECT last_seen FROM traders WHERE address=?", (w,))["last_seen"] == 5
+    assert main.S.db.one("SELECT COUNT(*) n FROM spot_holdings")["n"] == 10
+    assert main.S.price_miss == {}
+
+
+def test_price_calls_capped_and_prioritised(monkeypatch):
+    from app.sol import SolClient
+    asked = []
+
+    def handler(req):
+        ids = req.url.params["ids"].split(",")
+        asked.append(ids)
+        return httpx.Response(200, json={i: {"usdPrice": 1.0, "liquidity": 1, "decimals": 6} for i in ids})
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real(*a, transport=httpx.MockTransport(handler), **k))
+    c = SolClient("https://rpc", "https://jup")
+    mints = [f"m{i}" for i in range(500)]
+    got = asyncio.run(c.prices(mints, max_calls=3))
+    assert len(asked) == 3 and asked[0][0] == "m0" and len(got) == 150 and c.priced == mints[:150]
