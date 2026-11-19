@@ -21,8 +21,10 @@ Every `POLL_SECONDS` (default 20):
    Exit when support falls below the exit thresholds or the signal reverses.
 5. Snapshot equity for both strategies.
 
-Positions a trader already held when you started tracking them are marked `pre` and are not copied
-(their entry price is stale). They do count toward consensus unless `CONSENSUS_INCLUDE_EXISTING=false`.
+Size a trader already held when you started tracking them is marked `pre` and never copied (its
+entry price is stale), but anything they add on top of it is. Selling eats into the old size first.
+HIP-3 markets (stocks, commodities, e.g. `xyz:TSLA`) are discovered per trader, and unified
+accounts are valued from their spot USDC plus unrealized P&L. They do count toward consensus unless `CONSENSUS_INCLUDE_EXISTING=false`.
 
 Fills are simulated at mid plus/minus `SLIPPAGE_BPS`, with `FEE_BPS` charged per side.
 

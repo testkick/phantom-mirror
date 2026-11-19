@@ -228,11 +228,14 @@ async function refresh() {
   } catch (e) { $('#status').textContent = 'error: ' + e.message; }
 }
 
-let dcat = 'perps', dwin = 'week', drows = [], derr = '';
+let dcat = 'perps', dwin = 'week', drows = [], derr = '', dseq = 0;
 async function loadDiscover() {
-  const t = $('#discover'); derr = ''; drows = [];
-  t.innerHTML = '<tbody><tr><td class="empty">Loading leaderboard…</td></tr></tbody>';
-  try { drows = await api(`/api/discover?category=${dcat}&window=${dwin}`); } catch (e) { derr = e.message; }
+  const seq = ++dseq, cat = dcat, win = dwin;
+  $('#discover').innerHTML = '<tbody><tr><td class="empty">Loading leaderboard…</td></tr></tbody>';
+  let rows = [], err = '';
+  try { rows = await api(`/api/discover?category=${cat}&window=${win}`); } catch (e) { err = e.message; }
+  if (seq !== dseq) return;  // a newer tab click superseded this request
+  drows = rows; derr = err;
   renderDiscover();
 }
 function renderDiscover() {

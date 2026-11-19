@@ -46,27 +46,32 @@ class Engine:
             if abs(new_szi - prev_szi) <= 1e-9 * max(abs(prev_szi), abs(new_szi), 1e-9):
                 continue  # unchanged
 
-            if first:
-                baseline, kind = (0 if self.cfg.copy_existing else 1), None
+            # `base` is the part of the position held before tracking began. Only size above it is
+            # copied, so adding to an old position is mirrored but the old size never is.
+            if first or (p is None and coin in state.get("baseline_coins", ())):
+                base, kind = (0.0 if self.cfg.copy_existing else new_szi), None
             elif _sign(prev_szi) == 0:
-                baseline, kind = 0, "open"
+                base, kind = 0.0, "open"
             elif _sign(new_szi) == 0:
-                baseline, kind = 0, "close"
+                base, kind = 0.0, "close"
             elif _sign(prev_szi) != _sign(new_szi):
-                baseline, kind = 0, "flip"
+                base, kind = 0.0, "flip"
             else:
-                baseline = p["baseline"]
+                base = p["base"]
+                if abs(new_szi) < abs(base):  # sold into the old part: shrink it
+                    base = new_szi
                 kind = "increase" if abs(new_szi) > abs(prev_szi) else "reduce"
+            baseline = 1 if abs(base) > EPS else 0
 
             if n is None:
                 db.x("DELETE FROM trader_positions WHERE address=? AND coin=?", (address, coin))
             else:
                 db.x(
-                    "INSERT INTO trader_positions(address,coin,szi,entry_px,leverage,baseline,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?) ON CONFLICT(address,coin) DO UPDATE SET "
+                    "INSERT INTO trader_positions(address,coin,szi,entry_px,leverage,baseline,base,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(address,coin) DO UPDATE SET "
                     "szi=excluded.szi, entry_px=excluded.entry_px, leverage=excluded.leverage, "
-                    "baseline=excluded.baseline, updated_at=excluded.updated_at",
-                    (address, coin, new_szi, n.get("entry_px"), n.get("leverage"), baseline, now),
+                    "baseline=excluded.baseline, base=excluded.base, updated_at=excluded.updated_at",
+                    (address, coin, new_szi, n.get("entry_px"), n.get("leverage"), baseline, base, now),
                 )
             if kind:
                 ev = {"ts": now, "address": address, "coin": coin, "kind": kind,
@@ -123,8 +128,8 @@ class Engine:
         cfg = self.cfg
         targets: dict[tuple[str, str], float] = {}
         rows = self.db.q(
-            "SELECT p.address, p.coin, p.szi, t.account_value FROM trader_positions p "
-            "JOIN traders t ON t.address=p.address WHERE t.active=1 AND p.baseline=0"
+            "SELECT p.address, p.coin, p.szi - p.base AS szi, t.account_value FROM trader_positions p "
+            "JOIN traders t ON t.address=p.address WHERE t.active=1"
         )
         for r in rows:
             av, mid = r["account_value"] or 0.0, mids.get(r["coin"])
@@ -238,20 +243,21 @@ class Engine:
             if abs(new_amt - old_amt) <= 1e-9 * max(old_amt, new_amt, 1e-9):
                 continue
             if first:
-                baseline, kind = (0 if self.cfg.copy_existing else 1), None
+                base, kind = (0.0 if self.cfg.copy_existing else new_amt), None
             elif old_amt <= EPS:
-                baseline, kind = 0, "buy"
+                base, kind = 0.0, "buy"
             elif new_amt <= EPS:
-                baseline, kind = 0, "sell all"
+                base, kind = 0.0, "sell all"
             else:
-                baseline = p["baseline"]
+                base = min(p["base"], new_amt)  # selling eats the old bag first
                 kind = "buy more" if new_amt > old_amt else "sell part"
+            baseline = 1 if base > EPS else 0
             if new_amt <= EPS:
                 db.x("DELETE FROM spot_holdings WHERE address=? AND mint=?", (address, mint))
             else:
-                db.x("INSERT INTO spot_holdings(address,mint,amount,baseline,updated_at) VALUES(?,?,?,?,?) "
+                db.x("INSERT INTO spot_holdings(address,mint,amount,baseline,base,updated_at) VALUES(?,?,?,?,?,?) "
                      "ON CONFLICT(address,mint) DO UPDATE SET amount=excluded.amount, baseline=excluded.baseline, "
-                     "updated_at=excluded.updated_at", (address, mint, new_amt, baseline, now))
+                     "base=excluded.base, updated_at=excluded.updated_at", (address, mint, new_amt, baseline, base, now))
             if kind:
                 px = (prices.get(mint) or {}).get("price")
                 ev = {"ts": now, "address": address, "coin": mint, "kind": kind,
@@ -278,8 +284,8 @@ class Engine:
         cfg = self.cfg
         targets: dict[tuple[str, str], float] = {}
         for r in self.db.q(
-            "SELECT h.address, h.mint, h.amount, t.account_value FROM spot_holdings h "
-            "JOIN traders t ON t.address=h.address WHERE t.active=1 AND t.chain='sol' AND h.baseline=0"
+            "SELECT h.address, h.mint, h.amount - h.base AS amount, t.account_value FROM spot_holdings h "
+            "JOIN traders t ON t.address=h.address WHERE t.active=1 AND t.chain='sol' AND h.amount - h.base > 0"
         ):
             pr = prices.get(r["mint"])
             av = r["account_value"] or 0.0

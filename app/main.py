@@ -11,6 +11,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -41,6 +42,7 @@ class State:
     mids: dict = {}                    # perp coin -> mid
     spot_px: dict = {}                 # mint -> {price, liquidity, ts}
     symbols: dict = {}                 # mint -> symbol
+    spot_rr: int = 0                   # round-robin position over spot wallets
     price_miss: dict = {}              # mint -> ts Jupiter last returned no price
     last_poll: float | None = None
     last_poll_error: str | None = None
@@ -86,11 +88,23 @@ async def poll_spot(now: float) -> None:
     if not traders and not held_paper:
         return
     snaps: dict[str, dict] = {}
-    for t in traders:
+    # Round-robin: read at most SPOT_WALLETS_PER_POLL wallets, continuing where the last poll
+    # stopped, so a rate-limited RPC still reaches every wallet in turn instead of starving the tail.
+    n = len(traders)
+    batch = [traders[(S.spot_rr + i) % n] for i in range(min(n, S.cfg.spot_wallets_per_poll))] if n else []
+    for i, t in enumerate(batch):
         try:
             snaps[t["address"]] = await S.sol.holdings(t["address"])
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:  # back off: retry this wallet first next poll
+                log.warning("Solana RPC rate-limited after %d of %d wallets this poll", i, len(batch))
+                batch = batch[:i]
+                break
+            _err(t["address"], e)
         except Exception as e:
             _err(t["address"], e)
+    if n:
+        S.spot_rr = (S.spot_rr + len(batch)) % n
 
     # Price what can trade this round on every poll; everything else (dust, pre-existing bags)
     # only every SPOT_PRICE_REFRESH_SECONDS, for portfolio value.
@@ -101,7 +115,7 @@ async def poll_spot(now: float) -> None:
             if mint in CASH_MINTS:
                 continue
             r = stored.get((addr, mint))
-            fresh = r is None or not r["baseline"] or r["amount"] != amt
+            fresh = r is None or r["amount"] - r["base"] > 1e-12 or r["amount"] != amt
             # unpriceable tokens back off even when "hot", or junk airdrops would be re-queried every poll
             if fresh and now - S.price_miss.get(mint, 0) >= S.cfg.spot_price_refresh_seconds:
                 hot.add(mint)
@@ -191,7 +205,8 @@ def init_state(cfg: Config | None = None, db_path: str | None = None) -> None:
             S.db.x("INSERT OR IGNORE INTO traders(address,label,source,chain,added_at) VALUES(?,?,?,?,?)",
                    (addr, name, "demo", "sol", time.time()))
     else:
-        S.hl = HLClient(S.cfg.hl_info_url, S.cfg.hl_leaderboard_url, S.cfg.hl_dexs)
+        S.hl = HLClient(S.cfg.hl_info_url, S.cfg.hl_leaderboard_url, S.cfg.hl_dexs,
+                        discover_seconds=S.cfg.hl_dex_discover_seconds)
         S.sol = SolClient(S.cfg.solana_rpc_url, S.cfg.jup_api_base, S.cfg.jup_api_key)
         S.discovery, S.dryrun = Discovery(S.cfg), DryRun(S.db, S.cfg)
 
@@ -244,7 +259,7 @@ def traders():
     for r in rows:
         strat = "spot_copy" if r["chain"] == "sol" else "copy"
         if r["chain"] == "sol":
-            pos = [dict(coin=p["mint"], symbol=sym(p["mint"]), szi=p["amount"], baseline=p["baseline"],
+            pos = [dict(coin=p["mint"], symbol=sym(p["mint"]), szi=p["amount"], baseline=int(p["amount"] - p["base"] <= 1e-9 * p["amount"]),
                         notional=p["amount"] * m[p["mint"]] if p["mint"] in m else None)
                    for p in spot_pos if p["address"] == r["address"]]
             pos = sorted((p for p in pos if (p["notional"] or 0) >= 1 or not p["baseline"]),
@@ -252,7 +267,8 @@ def traders():
             r["more_positions"] = max(0, len(pos) - 8)
             pos = pos[:8]
         else:
-            pos = [dict(p, symbol=p["coin"], notional=abs(p["szi"]) * m.get(p["coin"], p["entry_px"] or 0))
+            pos = [dict(p, symbol=p["coin"], baseline=int(abs(p["szi"] - p["base"]) <= 1e-9 * abs(p["szi"])),
+                        notional=abs(p["szi"]) * m.get(p["coin"], p["entry_px"] or 0))
                    for p in perp_pos if p["address"] == r["address"]]
             r["more_positions"] = 0
         r["positions"] = pos

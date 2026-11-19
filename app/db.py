@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS trader_positions (
     szi        REAL NOT NULL,                       -- signed size, + long / - short
     entry_px   REAL,
     leverage   REAL,
-    baseline   INTEGER NOT NULL DEFAULT 0,          -- 1 = was already open when tracking began
+    baseline   INTEGER NOT NULL DEFAULT 0,          -- 1 = part of it was open before tracking began
+    base       REAL NOT NULL DEFAULT 0,             -- that pre-tracking size (never copied)
     updated_at REAL NOT NULL,
     PRIMARY KEY (address, coin)
 );
@@ -68,7 +69,8 @@ CREATE TABLE IF NOT EXISTS spot_holdings (
     address    TEXT NOT NULL,
     mint       TEXT NOT NULL,
     amount     REAL NOT NULL,                       -- UI units (decimals applied)
-    baseline   INTEGER NOT NULL DEFAULT 0,          -- 1 = already held when tracking began
+    baseline   INTEGER NOT NULL DEFAULT 0,          -- 1 = part of it held before tracking began
+    base       REAL NOT NULL DEFAULT 0,             -- that pre-tracking amount (never copied)
     updated_at REAL NOT NULL,
     PRIMARY KEY (address, mint)
 );
@@ -111,6 +113,11 @@ class DB:
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(traders)")}
             if "chain" not in cols:
                 self.conn.execute("ALTER TABLE traders ADD COLUMN chain TEXT NOT NULL DEFAULT 'hl'")
+            # `base`: size held before tracking began (never copied); old rows were all-or-nothing
+            for table, size in (("trader_positions", "szi"), ("spot_holdings", "amount")):
+                if "base" not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN base REAL NOT NULL DEFAULT 0")
+                    self.conn.execute(f"UPDATE {table} SET base={size} WHERE baseline=1")
 
     def q(self, sql: str, args: tuple = ()) -> list[dict]:
         with self.lock:

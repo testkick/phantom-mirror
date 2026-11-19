@@ -28,6 +28,7 @@ class Config:
     # "" is the main Hyperliquid perp dex. Add HIP-3 dex names (comma separated) to
     # also track stock/commodity perps, e.g. HL_DEXS=",xyz"
     hl_dexs: list = field(default_factory=lambda: os.getenv("HL_DEXS", "").split(","))
+    hl_dex_discover_seconds: float = field(default_factory=lambda: _f("HL_DEX_DISCOVER_SECONDS", 1800))
     poll_seconds: float = field(default_factory=lambda: _f("POLL_SECONDS", 20))
     equity_snapshot_seconds: float = field(default_factory=lambda: _f("EQUITY_SNAPSHOT_SECONDS", 60))
 
@@ -58,6 +59,9 @@ class Config:
     solana_rpc_url: str = field(default_factory=lambda: os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"))
     jup_api_base: str = field(default_factory=lambda: os.getenv("JUP_API_BASE", "https://lite-api.jup.ag"))
     jup_api_key: str = field(default_factory=lambda: os.getenv("JUP_API_KEY", ""))
+    # how many spot wallets to read per poll (round-robin). The public RPC allows only a few.
+    spot_wallets_per_poll: int = field(default_factory=lambda: _i(
+        "SPOT_WALLETS_PER_POLL", 4 if "api.mainnet-beta.solana.com" in os.getenv("SOLANA_RPC_URL", "api.mainnet-beta.solana.com") else 50))
     spot_alloc_usd: float = field(default_factory=lambda: _f("SPOT_ALLOC_USD", 1_000))  # paper equity per spot trader
     spot_fee_bps: float = field(default_factory=lambda: _f("SPOT_FEE_BPS", 85))  # approximates an in-wallet swap fee; adjust
     spot_slippage_bps: float = field(default_factory=lambda: _f("SPOT_SLIPPAGE_BPS", 100))

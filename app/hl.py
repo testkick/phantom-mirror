@@ -31,11 +31,30 @@ def parse_state(raw: dict) -> dict:
     return {"account_value": av, "positions": positions}
 
 
+STABLES = {"USDC", "USDT0", "USDH", "USDE"}
+UNIFIED = {"unifiedAccount", "portfolioMargin"}
+
+
 class HLClient:
-    def __init__(self, info_url: str, leaderboard_url: str, dexs: list[str] | None = None):
+    """Reads every perp market a trader uses:
+    - HIP-3 markets (stocks, commodities: coins like "xyz:TSLA") live on separate perp dexes.
+      Each trader's dexes are found by sweeping all dexes every `discover_seconds`, a few
+      traders per poll so the sweep never bursts past Hyperliquid's rate limit.
+    - Unified / portfolio-margin accounts keep collateral as spot USDC; per-dex accountValue
+      is only margin in use. Their equity = spot stables (free + held) + unrealized P&L.
+    """
+
+    def __init__(self, info_url: str, leaderboard_url: str, dexs: list[str] | None = None,
+                 discover_seconds: float = 1800, sweeps_per_poll: int = 3):
         self.info_url = info_url
         self.leaderboard_url = leaderboard_url
-        self.dexs = dexs or [""]
+        self.forced = {d for d in (dexs or []) if d}  # HL_DEXS extras, always read
+        self.discover_seconds = discover_seconds
+        self.sweeps_per_poll = sweeps_per_poll
+        self.meta: dict[str, dict] = {}   # address -> {ts, dexs:set, abstraction}
+        self.all_dexs: list[str] = []
+        self._dexs_ts = 0.0
+        self._sweeps_left = sweeps_per_poll
         self.http = httpx.AsyncClient(timeout=15, headers={"Content-Type": "application/json"})
 
     async def _info(self, body: dict):
@@ -43,9 +62,22 @@ class HLClient:
         r.raise_for_status()
         return r.json()
 
+    async def _perp_dexs(self) -> list[str]:
+        if time.time() - self._dexs_ts > 3600:
+            self.all_dexs = [d["name"] for d in await self._info({"type": "perpDexs"}) if d and d.get("name")]
+            self._dexs_ts = time.time()
+        return self.all_dexs
+
+    def dexs_in_use(self) -> set[str]:
+        used = set(self.forced)
+        for m in self.meta.values():
+            used |= m["dexs"]
+        return used
+
     async def all_mids(self) -> dict[str, float]:
+        self._sweeps_left = self.sweeps_per_poll  # all_mids is called once at the start of each poll
         mids: dict[str, float] = {}
-        for dex in self.dexs:
+        for dex in [""] + sorted(self.dexs_in_use()):
             body = {"type": "allMids"}
             if dex:
                 body["dex"] = dex
@@ -59,16 +91,57 @@ class HLClient:
                     pass
         return mids
 
+    async def _dex_state(self, address: str, dex: str) -> dict:
+        body = {"type": "clearinghouseState", "user": address}
+        if dex:
+            body["dex"] = dex
+        return parse_state(await self._info(body))
+
     async def state(self, address: str) -> dict:
-        merged = {"account_value": 0.0, "positions": {}}
-        for dex in self.dexs:
-            body = {"type": "clearinghouseState", "user": address}
-            if dex:
-                body["dex"] = dex
-            st = parse_state(await self._info(body))
-            merged["account_value"] += st["account_value"]
-            merged["positions"].update(st["positions"])
-        return merged
+        m = self.meta.get(address)
+        sweep = (m is None or time.time() - m["ts"] > self.discover_seconds) and self._sweeps_left > 0
+        known = set(m["dexs"]) if m else set()
+        per_dex: dict[str, dict] = {"": await self._dex_state(address, "")}
+        if sweep:
+            self._sweeps_left -= 1
+            abstraction = await self._info({"type": "userAbstraction", "user": address})
+            found = set()
+            for dex in await self._perp_dexs():
+                st = await self._dex_state(address, dex)
+                per_dex[dex] = st
+                if st["positions"] or st["account_value"] > 0:
+                    found.add(dex)
+            # keep dexes we already knew about until a sweep shows them empty
+            m = {"ts": time.time(), "dexs": found, "abstraction": abstraction if isinstance(abstraction, str) else ""}
+            self.meta[address] = m
+        for dex in sorted((m["dexs"] if m else set()) | self.forced):
+            if dex not in per_dex:
+                per_dex[dex] = await self._dex_state(address, dex)
+        if m and per_dex.keys() - {""}:
+            m["dexs"] |= {d for d, st in per_dex.items() if d and st["positions"]}
+
+        positions: dict = {}
+        perp_av = 0.0
+        # Positions on a market we're seeing for the first time existed before we looked:
+        # treat them as pre-tracking, never as fresh opens to copy at today's price.
+        baseline_coins: set[str] = set()
+        for dex, st in per_dex.items():
+            positions.update(st["positions"])
+            perp_av += st["account_value"]
+            if dex and dex not in known and dex not in self.forced:
+                baseline_coins |= set(st["positions"])
+        av = perp_av
+        if m and m["abstraction"] in UNIFIED:
+            spot = await self._info({"type": "spotClearinghouseState", "user": address})
+            total = hold = 0.0
+            for b in spot.get("balances", []) or []:
+                if b.get("coin") in STABLES:
+                    total += float(b.get("total") or 0)
+                    hold += float(b.get("hold") or 0)
+            # per-dex accountValue = margin held + unrealized P&L, and the held margin is
+            # already inside the spot total, so subtract it once.
+            av = total + (perp_av - hold)
+        return {"account_value": av, "positions": positions, "baseline_coins": baseline_coins}
 
     async def leaderboard(self, window: str = "week", top: int = 10, min_account_value: float = 0) -> list[dict]:
         """Best-effort: Hyperliquid's leaderboard file is undocumented and large.
