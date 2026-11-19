@@ -207,6 +207,24 @@ class Engine:
                           f"consensus lost ({b['long']}L/{b['short']}S)")
                 del current[coin]
 
+        # position size: equal weight spreads current equity across all slots, so more positions
+        # never means more total exposure; "fixed" uses CONSENSUS_NOTIONAL_USD per signal
+        if cfg.consensus_sizing == "equal_weight":
+            target_usd = max(0.0, self.stats("consensus", mids)["equity"]) / cfg.consensus_max_positions
+            # resize held positions that drifted far from the target (also shrinks old $1,000 positions)
+            for coin, size in list(current.items()):
+                mid = mids.get(coin)
+                if not mid or target_usd <= 0:
+                    continue
+                cur_usd = abs(size) * mid
+                if abs(cur_usd - target_usd) / target_usd > cfg.consensus_rebalance_threshold:
+                    new_size = _sign(size) * target_usd / mid
+                    self.fill("consensus", CONSENSUS_SOURCE, coin, new_size - size, mid, now,
+                              f"rebalance to ${target_usd:,.0f}")
+                    current[coin] = new_size
+        else:
+            target_usd = cfg.consensus_notional_usd
+
         # entries: strongest agreement first
         candidates = sorted(
             ((c, b) for c, b in board.items() if b["signal"] and c not in current and mids.get(c)),
@@ -215,7 +233,9 @@ class Engine:
         for coin, b in candidates:
             if len(current) >= cfg.consensus_max_positions:
                 break
-            size = b["signal"] * cfg.consensus_notional_usd / mids[coin]
+            if target_usd < cfg.min_order_usd:
+                break
+            size = b["signal"] * target_usd / mids[coin]
             self.fill("consensus", CONSENSUS_SOURCE, coin, size, mids[coin], now,
                       f"consensus {b['long']}L/{b['short']}S")
             current[coin] = size

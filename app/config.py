@@ -51,8 +51,10 @@ class Config:
     consensus_agreement: float = field(default_factory=lambda: _f("CONSENSUS_AGREEMENT", 0.70))
     consensus_exit_min_traders: int = field(default_factory=lambda: _i("CONSENSUS_EXIT_MIN_TRADERS", 2))
     consensus_exit_agreement: float = field(default_factory=lambda: _f("CONSENSUS_EXIT_AGREEMENT", 0.50))
-    consensus_notional_usd: float = field(default_factory=lambda: _f("CONSENSUS_NOTIONAL_USD", 1_000))
-    consensus_max_positions: int = field(default_factory=lambda: _i("CONSENSUS_MAX_POSITIONS", 10))
+    consensus_notional_usd: float = field(default_factory=lambda: _f("CONSENSUS_NOTIONAL_USD", 1_000))  # used when CONSENSUS_SIZING=fixed
+    consensus_max_positions: int = field(default_factory=lambda: _i("CONSENSUS_MAX_POSITIONS", 30))
+    consensus_sizing: str = field(default_factory=lambda: os.getenv("CONSENSUS_SIZING", "equal_weight"))  # equal_weight | fixed
+    consensus_rebalance_threshold: float = field(default_factory=lambda: _f("CONSENSUS_REBALANCE_THRESHOLD", 0.25))
     consensus_include_existing: bool = field(default_factory=lambda: _b("CONSENSUS_INCLUDE_EXISTING", True))
 
     # --- strategy C: Solana spot copy ---

@@ -207,7 +207,7 @@ async function refresh() {
     $('#status').textContent = `${cfg.demo_mode ? 'DEMO DATA · ' : ''}paper trading · last poll ${ago(sum.last_poll)}` + (sum.last_poll_error ? ` · error: ${sum.last_poll_error}` : '');
     const by = Object.fromEntries(sum.strategies.map(s => [s.strategy, s]));
     strategyCard($('#s-copy'), by.copy, '1:1 copy', '--series-1', `Mirrors each trader at their own leverage on ${usd(cfg.copy_alloc_usd)} of paper equity per trader, capped at ${cfg.copy_max_leverage}×.`);
-    strategyCard($('#s-consensus'), by.consensus, 'Consensus', '--series-2', `${usd(cfg.consensus_notional_usd)} per signal when ≥${cfg.consensus_min_traders} traders and ≥${Math.round(cfg.consensus_agreement*100)}% of holders agree.`);
+    strategyCard($('#s-consensus'), by.consensus, 'Consensus', '--series-2', `${cfg.consensus_sizing === 'equal_weight' ? `Equity split across up to ${cfg.consensus_max_positions} positions (about ${usd(by.consensus.equity / cfg.consensus_max_positions)} each)` : `${usd(cfg.consensus_notional_usd)} per signal, max ${cfg.consensus_max_positions}`}, entered when ≥${cfg.consensus_min_traders} traders and ≥${Math.round(cfg.consensus_agreement*100)}% of holders agree, strongest first.`);
     strategyCard($('#s-spot'), by.spot_copy, 'Spot copy', '--series-3', `Mirrors Solana token buys and sells at the trader's portfolio weight on ${usd(cfg.spot_alloc_usd)} per trader, max ${Math.round(cfg.spot_max_position_pct*100)}% per token. ${(cfg.spot_fee_bps+cfg.spot_slippage_bps)/100}% cost per side.`);
     $('#rule').textContent = `Signal needs ≥${cfg.consensus_min_traders} traders and ≥${Math.round(cfg.consensus_agreement*100)}% agreement.`;
     names = Object.fromEntries(traders.map(t => [t.address, t.label || short(t.address)]));

@@ -14,6 +14,7 @@ A, B, C, D = ("0x" + ch * 40 for ch in "abcd")
 def mk(**over):
     cfg = Config()
     cfg.fee_bps, cfg.slippage_bps = 0.0, 0.0
+    cfg.consensus_sizing, cfg.consensus_max_positions = "fixed", 10
     for k, v in over.items():
         setattr(cfg, k, v)
     db = DB(":memory:")
@@ -190,3 +191,22 @@ def test_demo_end_to_end_and_api(tmp_path):
     assert c.delete("/api/traders/" + "0x" + "1" * 40, headers={"x-admin-token": "secret"}).json()["ok"]
     asyncio.run(main.poll_once(now=1_700_100_000))
     assert not [p for p in c.get("/api/positions").json() if p["source"] == "0x" + "1" * 40]
+
+
+def test_consensus_equal_weight_spreads_equity_and_shrinks_old_positions():
+    e, db = mk(consensus_sizing="equal_weight", consensus_max_positions=4)
+    mids = {"BTC": 100.0, "ETH": 10.0}
+    for t in (A, B, C, D):
+        e.ingest_trader(t, st(), mids, 1)
+    # an old fixed-size $1,000 position from before the switch
+    e.fill("consensus", "consensus", "BTC", 10.0, 100.0, 1, "old")
+    for t in (A, B, C):
+        e.ingest_trader(t, st(BTC=1, ETH=1), mids, 2)
+    e.run_consensus(mids, 2)
+    pos = {r["coin"]: r["size"] for r in db.q("SELECT * FROM paper_positions WHERE strategy='consensus'")}
+    assert pos["BTC"] == pytest.approx(10_000 / 4 / 100)     # $2,500 target: grown from $1,000
+    assert pos["ETH"] == pytest.approx(10_000 / 4 / 10)
+    total = sum(abs(s) * mids[c] for c, s in pos.items())
+    assert total <= 10_000
+    e.run_consensus({"BTC": 110.0, "ETH": 10.0}, 3)           # +10% drift: under the 25% threshold
+    assert db.one("SELECT COUNT(*) n FROM paper_fills WHERE reason LIKE 'rebalance%'")["n"] == 1
