@@ -129,7 +129,7 @@ class Engine:
         targets: dict[tuple[str, str], float] = {}
         rows = self.db.q(
             "SELECT p.address, p.coin, p.szi - p.base AS szi, t.account_value FROM trader_positions p "
-            "JOIN traders t ON t.address=p.address WHERE t.active=1"
+            "JOIN traders t ON t.address=p.address WHERE t.active=1 AND t.role='copy'"
         )
         for r in rows:
             av, mid = r["account_value"] or 0.0, mids.get(r["coin"])
@@ -169,9 +169,19 @@ class Engine:
             self.fill("copy", source, coin, tgt - cur, mid, now, reason)
 
     # ------------------------------------------------------------------ strategy B: consensus
+    def thresholds(self) -> dict:
+        """Vote minimums that grow with the group, so a big group needs proportionally more agreement."""
+        import math
+        cfg = self.cfg
+        n = self.db.one("SELECT COUNT(*) n FROM traders WHERE active=1 AND chain='hl'")["n"]
+        return {"members": n,
+                "entry": max(cfg.consensus_min_traders, math.ceil(cfg.consensus_min_share * n - 1e-9)),
+                "exit": max(cfg.consensus_exit_min_traders, math.ceil(cfg.consensus_exit_min_share * n - 1e-9))}
+
     def consensus_board(self) -> dict[str, dict]:
         """coin -> {long, short, signal}. One vote per active trader holding the coin."""
         cfg = self.cfg
+        min_votes = self.thresholds()["entry"]
         cond = "" if cfg.consensus_include_existing else " AND p.baseline=0"
         board: dict[str, dict] = {}
         for r in self.db.q(
@@ -184,13 +194,14 @@ class Engine:
             total = b["long"] + b["short"]
             b["signal"] = 0
             for side, n in ((1, b["long"]), (-1, b["short"])):
-                if n >= cfg.consensus_min_traders and n / total >= cfg.consensus_agreement:
+                if n >= min_votes and n / total >= cfg.consensus_agreement:
                     b["signal"] = side
         return board
 
     def run_consensus(self, mids: dict, now: float) -> None:
         cfg = self.cfg
         board = self.consensus_board()
+        exit_min = self.thresholds()["exit"]
         current = {r["coin"]: r["size"] for r in self.db.q("SELECT * FROM paper_positions WHERE strategy='consensus'")}
 
         # exits first (frees slots)
@@ -201,7 +212,7 @@ class Engine:
             b = board.get(coin, {"long": 0, "short": 0, "signal": 0})
             mine = b["long"] if size > 0 else b["short"]
             total = b["long"] + b["short"]
-            hold = mine >= cfg.consensus_exit_min_traders and total and mine / total >= cfg.consensus_exit_agreement
+            hold = mine >= exit_min and total and mine / total >= cfg.consensus_exit_agreement
             if not hold or (b["signal"] and b["signal"] != _sign(size)):
                 self.fill("consensus", CONSENSUS_SOURCE, coin, -size, mid, now,
                           f"consensus lost ({b['long']}L/{b['short']}S)")

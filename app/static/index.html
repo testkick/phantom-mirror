@@ -103,6 +103,8 @@ button.follow{padding:3px 12px;font-size:12px}
     <h2>Consensus board</h2>
     <div class="scroll"><table id="board"></table></div>
     <p class="note" id="rule"></p>
+    <p class="note" id="roster"></p>
+    <button id="rosterbtn" style="margin-top:8px;font-size:12px;padding:4px 10px">Refresh group now</button>
   </section>
 
   <section class="card c12">
@@ -209,15 +211,20 @@ async function refresh() {
     strategyCard($('#s-copy'), by.copy, '1:1 copy', '--series-1', `Mirrors each trader at their own leverage on ${usd(cfg.copy_alloc_usd)} of paper equity per trader, capped at ${cfg.copy_max_leverage}×.`);
     strategyCard($('#s-consensus'), by.consensus, 'Consensus', '--series-2', `${cfg.consensus_sizing === 'equal_weight' ? `Equity split across up to ${cfg.consensus_max_positions} positions (about ${usd(by.consensus.equity / cfg.consensus_max_positions)} each)` : `${usd(cfg.consensus_notional_usd)} per signal, max ${cfg.consensus_max_positions}`}, entered when ≥${cfg.consensus_min_traders} traders and ≥${Math.round(cfg.consensus_agreement*100)}% of holders agree, strongest first.`);
     strategyCard($('#s-spot'), by.spot_copy, 'Spot copy', '--series-3', `Mirrors Solana token buys and sells at the trader's portfolio weight on ${usd(cfg.spot_alloc_usd)} per trader, max ${Math.round(cfg.spot_max_position_pct*100)}% per token. ${(cfg.spot_fee_bps+cfg.spot_slippage_bps)/100}% cost per side.`);
-    $('#rule').textContent = `Signal needs ≥${cfg.consensus_min_traders} traders and ≥${Math.round(cfg.consensus_agreement*100)}% agreement.`;
+    const th = sum.consensus_thresholds, autoN = traders.filter(t => t.auto && t.active).length;
+    $('#rule').textContent = `Group: ${th.members} perps traders (${autoN} added automatically). Signal needs ≥${th.entry} traders on one side and ≥${Math.round(cfg.consensus_agreement*100)}% agreement; held while ≥${th.exit} remain.`;
+    const R = sum.roster;
+    $('#roster').textContent = !cfg.roster_enabled ? 'Automatic group is off (ROSTER_ENABLED=false).'
+      : R ? `Group last refreshed ${ago(R.ts)}: ${R.added} joined, ${R.leaving} leaving (${cfg.roster_drop_days}-day grace), ${R.dropped} dropped. Picks the top ${cfg.roster_size} by monthly profit: profitable month and all time, ≥${usd(cfg.roster_min_account_usd)} account, market makers excluded. Auto members vote only; they aren't copied 1:1.`
+      : 'Automatic group runs shortly after start, then daily.';
     names = Object.fromEntries(traders.map(t => [t.address, t.label || short(t.address)]));
     series = eq; drawChart();
 
     table($('#traders'), ['Trader','Address','>Account','Open positions','>Copy P&L','Seen',''], traders.map(t => `<tr style="${t.active ? '' : 'opacity:.45'}">
-      <td>${esc(t.label) || '–'} <span class="tag">${t.chain === 'sol' ? 'spot' : 'perps'}</span></td><td class="mono" title="${esc(t.address)}">${short(t.address)}</td>
+      <td>${esc(t.label) || '–'} <span class="tag">${t.chain === 'sol' ? 'spot' : 'perps'}</span>${t.role === 'voter' ? ' <span class="tag" title="Counts toward consensus; not copied 1:1">voter</span>' : ''}${t.auto && t.out_since && t.active ? ' <span class="tag" title="Fell out of the automatic selection; dropped after the grace period">leaving</span>' : ''}</td><td class="mono" title="${esc(t.address)}">${short(t.address)}</td>
       <td class="r num">${usd(t.account_value)}</td>
       <td style="white-space:normal">${t.positions.map(p => `${esc(p.symbol)} ${t.chain === 'sol' ? `<span class="num" style="color:var(--text2)">${usd(p.notional)}</span>` : side(p.szi)}${p.baseline ? ' <span class="tag" title="Held before tracking began; not copied">pre</span>' : ''}`).join(', ') || (t.active ? 'flat' : 'removed')}${t.more_positions ? ` <span style="color:var(--muted)">+${t.more_positions} more</span>` : ''}</td>
-      <td class="r num">${signed(t.copy_pnl)}</td><td>${t.last_error ? `<span class="down" title="${esc(t.last_error)}">error</span>` : ago(t.last_seen)}</td>
+      <td class="r num">${t.role === 'voter' ? '<span style="color:var(--muted)">votes only</span>' : signed(t.copy_pnl)}</td><td>${t.last_error ? `<span class="down" title="${esc(t.last_error)}">error</span>` : ago(t.last_seen)}</td>
       <td>${t.active ? `<button class="link" data-rm="${esc(t.address)}">remove</button>` : ''}</td></tr>`), 'No traders yet. Paste a 0x address (perps) or a Solana wallet address (spot) above.');
     table($('#board'), ['Coin','>Long','>Short','Signal'], board.map(b => `<tr><td>${esc(b.coin)}</td><td class="r num">${b.long}</td><td class="r num">${b.short}</td><td>${b.signal ? side(b.signal) : '<span style="color:var(--muted)">–</span>'}</td></tr>`), 'No open positions among tracked traders.');
     table($('#positions'), ['Strategy','Source','Coin','Side','>Size','>Entry','>Mark','>Notional','>Unrealized','Opened'], pos.map(p => `<tr>
@@ -288,6 +295,10 @@ $('#seed').onclick = async () => { $('#msg').textContent = 'Fetching Hyperliquid
   catch (e) { $('#msg').textContent = e.message; } };
 $('#traders').onclick = async ev => { const a = ev.target.dataset.rm; if (!a) return;
   try { await api('/api/traders/' + a, {method:'DELETE'}); refresh(); } catch (e) { $('#msg').textContent = e.message; } };
+$('#rosterbtn').onclick = async ev => { const b = ev.target; b.disabled = true; b.textContent = 'Refreshing… (leaderboard is large)';
+  try { const r = await api('/api/roster/refresh', {method:'POST'}); b.textContent = `Done: ${r.added} joined, ${r.leaving} leaving, ${r.dropped} dropped`; refresh(); }
+  catch (e) { b.textContent = 'Refresh failed: ' + e.message; }
+  setTimeout(() => { b.disabled = false; b.textContent = 'Refresh group now'; }, 8000); };
 addEventListener('resize', drawChart);
 refresh(); loadDiscover(); setInterval(refresh, 10000);
 </script>

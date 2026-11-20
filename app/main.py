@@ -20,6 +20,7 @@ from .config import Config
 from .db import DB
 from .discover import PERP_WINDOWS, SPOT_WINDOWS, DemoDiscovery, Discovery
 from .dryrun import DemoDryRun, DryRun
+from . import roster
 from .engine import STRATEGIES, Engine
 from .hl import DemoClient, HLClient
 from .sol import CASH_MINTS, SOL_ADDR_RE, SOL_MINT, DemoSolClient, SolClient
@@ -72,13 +73,21 @@ async def poll_perps(now: float) -> None:
     traders = S.db.q("SELECT address FROM traders WHERE active=1 AND chain='hl'")
     mids = await S.hl.all_mids()
     S.mids = mids
-    for t in traders:
-        try:
-            state = await S.hl.state(t["address"])
-            for ev in S.engine.ingest_trader(t["address"], state, mids, now):
-                log.info("EVENT %s %s %s %.6g -> %.6g", ev["address"][:10], ev["kind"], ev["coin"], ev["prev_szi"], ev["new_szi"])
-        except Exception as e:  # a failed fetch must never be read as "trader went flat"
-            _err(t["address"], e)
+    # fetch concurrently (bounded), then record in order: a big group still polls quickly
+    sem = asyncio.Semaphore(S.cfg.hl_concurrency)
+
+    async def fetch(addr):
+        async with sem:
+            try:
+                return addr, await S.hl.state(addr), None
+            except Exception as e:
+                return addr, None, e
+    for addr, state, err in await asyncio.gather(*(fetch(t["address"]) for t in traders)):
+        if err is not None:  # a failed fetch must never be read as "trader went flat"
+            _err(addr, err)
+            continue
+        for ev in S.engine.ingest_trader(addr, state, mids, now):
+            log.info("EVENT %s %s %s %.6g -> %.6g", ev["address"][:10], ev["kind"], ev["coin"], ev["prev_szi"], ev["new_szi"])
     S.engine.run_strategies(mids, now)
 
 
@@ -182,6 +191,21 @@ async def poll_once(now: float | None = None) -> None:
     S.last_poll, S.last_poll_error = now, ("; ".join(errors) or None)
 
 
+async def roster_loop() -> None:
+    """Refresh the automatic consensus group every ROSTER_REFRESH_HOURS (checked every 10 min)."""
+    while True:
+        try:
+            last = roster.last(S.db)
+            if not last or time.time() - last["ts"] >= S.cfg.roster_refresh_hours * 3600:
+                summary = await roster.refresh(S.db, S.cfg)
+                log.info("ROSTER %s", summary)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("roster refresh failed")
+        await asyncio.sleep(600)
+
+
 async def poll_loop() -> None:
     while True:
         try:
@@ -221,9 +245,12 @@ def init_state(cfg: Config | None = None, db_path: str | None = None) -> None:
 async def lifespan(app: FastAPI):
     init_state()
     task = asyncio.create_task(poll_loop())
+    rtask = asyncio.create_task(roster_loop()) if S.cfg.roster_enabled and not S.cfg.demo_mode else None
     log.info("started (demo=%s, poll=%ss)", S.cfg.demo_mode, S.cfg.poll_seconds)
     yield
     task.cancel()
+    if rtask:
+        rtask.cancel()
     await S.hl.close()
     await S.sol.close()
     await S.dryrun.close()
@@ -250,6 +277,8 @@ def summary():
     return {
         "now": time.time(), "last_poll": S.last_poll, "last_poll_error": S.last_poll_error,
         "strategies": [S.engine.stats(s, m) for s in STRATEGIES],
+        "consensus_thresholds": S.engine.thresholds(),
+        "roster": roster.last(S.db),
         "config": S.cfg.public(),
     }
 
@@ -419,6 +448,15 @@ async def seed(body: SeedIn):
         raise HTTPException(502, f"leaderboard fetch failed: {type(e).__name__}: {e}")
     added = [r["address"] for r in rows if _add(r["address"], r["label"] or f"HL {body.window} top", "hl_leaderboard")]
     return {"found": len(rows), "added": added}
+
+
+@app.post("/api/roster/refresh", dependencies=[Depends(admin)])
+async def roster_refresh():
+    """Rebuild the automatic consensus group now (otherwise it runs every ROSTER_REFRESH_HOURS)."""
+    try:
+        return await roster.refresh(S.db, S.cfg)
+    except Exception as e:
+        raise HTTPException(502, f"roster refresh failed: {type(e).__name__}: {e}")
 
 
 @app.post("/api/reset", dependencies=[Depends(admin)])

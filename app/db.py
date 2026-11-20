@@ -93,6 +93,10 @@ CREATE TABLE IF NOT EXISTS dryrun (
     status     TEXT NOT NULL,                       -- ok | blocked | error
     detail     TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS kv (
+    k TEXT PRIMARY KEY,
+    v TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_fills_ts ON paper_fills(ts);
 CREATE INDEX IF NOT EXISTS idx_equity_ts ON equity(strategy, ts);
@@ -113,6 +117,11 @@ class DB:
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(traders)")}
             if "chain" not in cols:
                 self.conn.execute("ALTER TABLE traders ADD COLUMN chain TEXT NOT NULL DEFAULT 'hl'")
+            # role: 'copy' = copied 1:1 and votes in consensus; 'voter' = consensus vote only
+            for col, ddl in (("role", "TEXT NOT NULL DEFAULT 'copy'"), ("auto", "INTEGER NOT NULL DEFAULT 0"),
+                             ("out_since", "REAL")):
+                if col not in cols:
+                    self.conn.execute(f"ALTER TABLE traders ADD COLUMN {col} {ddl}")
             # `base`: size held before tracking began (never copied); old rows were all-or-nothing
             for table, size in (("trader_positions", "szi"), ("spot_holdings", "amount")):
                 if "base" not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:

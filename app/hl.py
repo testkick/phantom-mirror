@@ -100,10 +100,11 @@ class HLClient:
     async def state(self, address: str) -> dict:
         m = self.meta.get(address)
         sweep = (m is None or time.time() - m["ts"] > self.discover_seconds) and self._sweeps_left > 0
+        if sweep:  # claim the budget before any await: state() runs concurrently for many traders
+            self._sweeps_left -= 1
         known = set(m["dexs"]) if m else set()
         per_dex: dict[str, dict] = {"": await self._dex_state(address, "")}
         if sweep:
-            self._sweeps_left -= 1
             abstraction = await self._info({"type": "userAbstraction", "user": address})
             found = set()
             for dex in await self._perp_dexs():

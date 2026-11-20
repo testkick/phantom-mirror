@@ -28,6 +28,7 @@ class Config:
     # "" is the main Hyperliquid perp dex. Add HIP-3 dex names (comma separated) to
     # also track stock/commodity perps, e.g. HL_DEXS=",xyz"
     hl_dexs: list = field(default_factory=lambda: os.getenv("HL_DEXS", "").split(","))
+    hl_concurrency: int = field(default_factory=lambda: _i("HL_CONCURRENCY", 6))
     hl_dex_discover_seconds: float = field(default_factory=lambda: _f("HL_DEX_DISCOVER_SECONDS", 1800))
     poll_seconds: float = field(default_factory=lambda: _f("POLL_SECONDS", 20))
     equity_snapshot_seconds: float = field(default_factory=lambda: _f("EQUITY_SNAPSHOT_SECONDS", 60))
@@ -56,6 +57,17 @@ class Config:
     consensus_sizing: str = field(default_factory=lambda: os.getenv("CONSENSUS_SIZING", "equal_weight"))  # equal_weight | fixed
     consensus_rebalance_threshold: float = field(default_factory=lambda: _f("CONSENSUS_REBALANCE_THRESHOLD", 0.25))
     consensus_include_existing: bool = field(default_factory=lambda: _b("CONSENSUS_INCLUDE_EXISTING", True))
+
+    # --- automatic consensus group ---
+    roster_enabled: bool = field(default_factory=lambda: _b("ROSTER_ENABLED", True))
+    roster_size: int = field(default_factory=lambda: _i("ROSTER_SIZE", 25))
+    roster_min_account_usd: float = field(default_factory=lambda: _f("ROSTER_MIN_ACCOUNT_USD", 100_000))
+    roster_max_weekly_turnover: float = field(default_factory=lambda: _f("ROSTER_MAX_WEEKLY_TURNOVER", 50))
+    roster_drop_days: float = field(default_factory=lambda: _f("ROSTER_DROP_DAYS", 3))
+    roster_refresh_hours: float = field(default_factory=lambda: _f("ROSTER_REFRESH_HOURS", 24))
+    # consensus vote minimums scale with group size: max(fixed minimum, share x active members)
+    consensus_min_share: float = field(default_factory=lambda: _f("CONSENSUS_MIN_SHARE", 0.15))
+    consensus_exit_min_share: float = field(default_factory=lambda: _f("CONSENSUS_EXIT_MIN_SHARE", 0.08))
 
     # --- strategy C: Solana spot copy ---
     solana_rpc_url: str = field(default_factory=lambda: os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"))

@@ -44,6 +44,15 @@ Limits: a buy and sell inside one poll interval is invisible; prices are Jupiter
 flat slippage assumption, which flatters thin memecoins; the public Solana RPC rate-limits hard, so
 set `SOLANA_RPC_URL` to a provider endpoint for more than a couple of wallets.
 
+## Automatic consensus group
+
+Every `ROSTER_REFRESH_HOURS` the Hyperliquid leaderboard is filtered for traders profitable over the
+month and all time, with an account of at least `ROSTER_MIN_ACCOUNT_USD`, excluding market makers
+(weekly volume over `ROSTER_MAX_WEEKLY_TURNOVER` x account). The top `ROSTER_SIZE` by monthly profit
+join as **voters**: they count toward consensus but are not copied 1:1. Members who fall out get a
+`ROSTER_DROP_DAYS` grace period. Traders added by hand are never changed. Consensus vote minimums
+scale with the group (`CONSENSUS_MIN_SHARE`, `CONSENSUS_EXIT_MIN_SHARE`).
+
 ## Suggested traders
 
 The dashboard lists traders to follow with one click. Perps come from Hyperliquid's leaderboard
